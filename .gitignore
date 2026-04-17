@@ -1,0 +1,23 @@
+# Секреты и конфиги с паролями
+.env
+config/synapse/homeserver.yaml
+config/synapse/*.signing.key
+config/coturn/turnserver.conf
+config/livekit/livekit.yaml
+
+# Генерируемые файлы
+docker-compose.yml
+ports.txt
+backup.sh
+
+# Сертификаты
+config/nginx/matrix.conf
+config/nginx/matrix.conf.bak
+
+# Данные
+data/
+backups/
+
+# Системное
+.DS_Store
+*.log
