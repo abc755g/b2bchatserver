@@ -3,6 +3,24 @@
 Самостоятельно размещаемый корпоративный мессенджер на базе Matrix/Synapse.  
 Развёртывается одной командой, управляется через простой интерфейс.
 
+## Регистрация VDS (ссылки)
+
+Сервис можно развернуть на вашем собственном сервере или на VDS.
+
+Домен для установки обязателен (например, `chat.yourcompany.ru`): без домена не получится корректно настроить SSL и доступ к серверу.
+
+Если выбираете VDS и регистраторов доменов, мы рекомендуем проверенные компании с оптимальным соотношением "цена-качество":
+
+- firstVDS: `https://firstvds.ru/?from=519065` (промокод `648519065` для скидки 25% на первый месяц)
+- Timeweb Cloud: `https://timeweb.cloud/?i=141497`
+- Selectel: `https://selectel.ru/?ref_code=beeabc92bf`
+
+Подробные пошаговые инструкции для каждого провайдера:
+
+- [firstVDS](docs/providers/firstvds.md)
+- [Timeweb Cloud](docs/providers/timeweb.md)
+- [Selectel](docs/providers/selectel.md)
+
 ## Что внутри
 
 | Компонент     | Назначение                              |
@@ -77,7 +95,6 @@ curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/ins
 **Web-клиенты:**
 - **Cinny** — лёгкий и быстрый web-клиент (можно установить через `install.sh`)
 - **FluffyChat Web** — web-версия FluffyChat (можно установить через `install.sh`)
-- **Hydrogen** — минималистичный web-клиент Matrix (подключается к вашему серверу)
 
 **Мобильные клиенты:**
 - **FluffyChat** (iOS/Android)

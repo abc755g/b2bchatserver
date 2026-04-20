@@ -832,23 +832,25 @@ mkdir -p config/synapse config/nginx
 
 BASE_URL="https://github.com/abc755g/b2bchatserver/releases/latest/download"
 
-TMP_START=$(mktemp /tmp/b2b-start.XXXXXX)
-TMP_MANAGE=$(mktemp /tmp/b2b-manage.XXXXXX)
-TMP_LOG=$(mktemp /tmp/b2b-log.XXXXXX)
-TMP_NGINX=$(mktemp /tmp/b2b-nginx.XXXXXX)
+TMP_ARCHIVE=$(mktemp /tmp/b2b-archive.XXXXXX)
+TMP_SUMS=$(mktemp /tmp/b2b-sums.XXXXXX)
 
-if curl -fsSL "${BASE_URL}/start.sh" -o "$TMP_START" && \
-   curl -fsSL "${BASE_URL}/manage.sh" -o "$TMP_MANAGE" && \
-   curl -fsSL "${BASE_URL}/config/synapse/log.config" -o "$TMP_LOG" && \
-   curl -fsSL "${BASE_URL}/config/nginx/matrix-http.conf" -o "$TMP_NGINX"; then
-    mv "$TMP_START" ./start.sh
-    mv "$TMP_MANAGE" ./manage.sh
-    mv "$TMP_LOG" ./config/synapse/log.config
-    mv "$TMP_NGINX" ./config/nginx/matrix-http.conf
+if curl -fsSL "${BASE_URL}/b2b-chat.tar.gz" -o "$TMP_ARCHIVE" && \
+   curl -fsSL "${BASE_URL}/SHA256SUMS" -o "$TMP_SUMS"; then
+    # Проверяем целостность архива
+    EXPECTED_SUM=$(grep 'b2b-chat.tar.gz' "$TMP_SUMS" | awk '{print $1}')
+    ACTUAL_SUM=$(sha256sum "$TMP_ARCHIVE" | awk '{print $1}')
+    if [ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]; then
+        rm -f "$TMP_ARCHIVE" "$TMP_SUMS"
+        err "Проверка целостности архива не прошла — файл повреждён или подменён."
+    fi
+    rm -f "$TMP_SUMS"
+    tar xzf "$TMP_ARCHIVE" -C .
+    rm -f "$TMP_ARCHIVE"
     log "Файлы скачаны из GitHub"
 else
-    rm -f "$TMP_START" "$TMP_MANAGE" "$TMP_LOG" "$TMP_NGINX"
-    warn "Не удалось скачать файлы из GitHub Releases, используем локальные файлы..."
+    rm -f "$TMP_ARCHIVE"
+    warn "Не удалось скачать архив из GitHub Releases, используем локальные файлы..."
 
     if [ -f "${SOURCE_DIR}/start.sh" ] && [ -f "${SOURCE_DIR}/manage.sh" ] && \
        [ -f "${SOURCE_DIR}/config/synapse/log.config" ] && [ -f "${SOURCE_DIR}/config/nginx/matrix-http.conf" ]; then
@@ -860,7 +862,7 @@ else
         fi
         log "Используем локальные файлы установки"
     else
-        err "Не удалось скачать файлы из GitHub, и локальные файлы установки не найдены."
+        err "Не удалось скачать архив из GitHub, и локальные файлы установки не найдены."
     fi
 fi
 
