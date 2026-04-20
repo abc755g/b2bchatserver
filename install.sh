@@ -12,24 +12,24 @@ title() { echo -e "\n${CYAN}$*${NC}"; }
 ask() {
     local prompt="$1" default="$2" result
     if [ -n "$default" ]; then
-        read -rp "$(echo -e "${BLUE}?${NC} ${prompt} [${default}]: ")" result
+        read -rp "$(echo -e "${BLUE}?${NC} ${prompt} [${default}]: ")" result </dev/tty
         echo "${result:-$default}"
     else
-        read -rp "$(echo -e "${BLUE}?${NC} ${prompt}: ")" result
+        read -rp "$(echo -e "${BLUE}?${NC} ${prompt}: ")" result </dev/tty
         echo "$result"
     fi
 }
 
 ask_secret() {
     local prompt="$1" result
-    read -rsp "$(echo -e "${BLUE}?${NC} ${prompt}: ")" result
-    echo "" >&2   # перенос строки на терминал — не в stdout, чтобы $() не захватил
+    read -rsp "$(echo -e "${BLUE}?${NC} ${prompt}: ")" result </dev/tty
+    echo "" >&2
     echo "$result"
 }
 
 ask_yn() {
     local prompt="$1" default="${2:-n}" result
-    read -rp "$(echo -e "${BLUE}?${NC} ${prompt} (y - да, n - нет) [${default}]: ")" result
+    read -rp "$(echo -e "${BLUE}?${NC} ${prompt} (y - да, n - нет) [${default}]: ")" result </dev/tty
     result="${result:-$default}"
     [[ "$result" =~ ^[Yy]$ ]]
 }
