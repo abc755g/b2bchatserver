@@ -55,6 +55,7 @@
 **Со звонками:** дополнительно 3478 UDP/TCP, 49152–49200 UDP
 
 > Если сервер находится в облаке (Timeweb, VK Cloud и др.) — откройте порты также в панели провайдера (Firewall / Security Groups).
+> Порт `8448` зарезервирован под Matrix Federation: не используйте его для `--port`, `--admin-port`, `--cinny-port`, `--fluffychat-port` или `--minio-port`.
 
 ## Установка
 

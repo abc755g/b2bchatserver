@@ -239,8 +239,11 @@ ensure_unique_port() {
     local _existing
     for _existing in "$@"; do
         [ -z "$_existing" ] && continue
-        [ "$_port" = "$_existing" ] && err "Конфликт портов: ${_name} использует порт ${_port}, который уже занят другим сервисом."
+        if [ "$_port" = "$_existing" ]; then
+            err "Конфликт портов: ${_name} использует порт ${_port}, который уже занят другим сервисом."
+        fi
     done
+    return 0
 }
 
 next_unique_random_port() {
@@ -261,6 +264,7 @@ next_unique_random_port() {
 
 is_valid_port "$PORT" || err "Некорректный порт Element/Synapse: ${PORT} (допустимо: 1-65535)"
 [ "$PORT" = "80" ] && err "Порт Element/Synapse не может быть 80: этот порт зарезервирован под HTTP-челленджи Let's Encrypt."
+[ "$PORT" = "8448" ] && err "Порт Element/Synapse не может быть 8448: этот порт зарезервирован под Matrix Federation."
 
 [ -n "$MINIO_PORT" ]      && is_valid_port "$MINIO_PORT"      || [ -z "$MINIO_PORT" ]      || err "Некорректный порт MinIO: ${MINIO_PORT}"
 [ -n "$ADMIN_PORT" ]      && is_valid_port "$ADMIN_PORT"      || [ -z "$ADMIN_PORT" ]      || err "Некорректный порт Admin UI: ${ADMIN_PORT}"
@@ -268,22 +272,23 @@ is_valid_port "$PORT" || err "Некорректный порт Element/Synapse:
 [ -n "$FLUFFYCHAT_PORT" ] && is_valid_port "$FLUFFYCHAT_PORT" || [ -z "$FLUFFYCHAT_PORT" ] || err "Некорректный порт FluffyChat: ${FLUFFYCHAT_PORT}"
 
 # Сначала проверяем пользовательские порты на дубли, затем генерируем отсутствующие.
-# 80 зарезервирован под HTTP-челленджи, 443 занят основным HTTPS server-блоком nginx.
-[ -n "$MINIO_PORT" ]      && ensure_unique_port "MinIO" "$MINIO_PORT" "$PORT" "80" "443"
-[ -n "$ADMIN_PORT" ]      && ensure_unique_port "Admin UI" "$ADMIN_PORT" "$PORT" "80" "443" "$MINIO_PORT"
-[ -n "$CINNY_PORT" ]      && ensure_unique_port "Cinny" "$CINNY_PORT" "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT"
-[ -n "$FLUFFYCHAT_PORT" ] && ensure_unique_port "FluffyChat" "$FLUFFYCHAT_PORT" "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT"
+# 80 зарезервирован под HTTP-челленджи, 443 занят основным HTTPS server-блоком nginx,
+# 8448 зарезервирован под Matrix Federation.
+[ -n "$MINIO_PORT" ]      && ensure_unique_port "MinIO" "$MINIO_PORT" "$PORT" "80" "443" "8448"
+[ -n "$ADMIN_PORT" ]      && ensure_unique_port "Admin UI" "$ADMIN_PORT" "$PORT" "80" "443" "8448" "$MINIO_PORT"
+[ -n "$CINNY_PORT" ]      && ensure_unique_port "Cinny" "$CINNY_PORT" "$PORT" "80" "443" "8448" "$MINIO_PORT" "$ADMIN_PORT"
+[ -n "$FLUFFYCHAT_PORT" ] && ensure_unique_port "FluffyChat" "$FLUFFYCHAT_PORT" "$PORT" "80" "443" "8448" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT"
 
-$USE_MINIO && [ -z "$MINIO_PORT" ] && MINIO_PORT=$(next_unique_random_port "$PORT" "80" "443")
-[ -z "$ADMIN_PORT" ]      && ADMIN_PORT=$(next_unique_random_port "$PORT" "80" "443" "$MINIO_PORT")
-[ -z "$CINNY_PORT" ]      && CINNY_PORT=$(next_unique_random_port "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT")
-[ -z "$FLUFFYCHAT_PORT" ] && FLUFFYCHAT_PORT=$(next_unique_random_port "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT")
+$USE_MINIO && [ -z "$MINIO_PORT" ] && MINIO_PORT=$(next_unique_random_port "$PORT" "80" "443" "8448")
+[ -z "$ADMIN_PORT" ]      && ADMIN_PORT=$(next_unique_random_port "$PORT" "80" "443" "8448" "$MINIO_PORT")
+[ -z "$CINNY_PORT" ]      && CINNY_PORT=$(next_unique_random_port "$PORT" "80" "443" "8448" "$MINIO_PORT" "$ADMIN_PORT")
+[ -z "$FLUFFYCHAT_PORT" ] && FLUFFYCHAT_PORT=$(next_unique_random_port "$PORT" "80" "443" "8448" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT")
 
 # Финальная проверка (включая случайно сгенерированные значения)
-ensure_unique_port "MinIO" "$MINIO_PORT" "$PORT" "80" "443"
-ensure_unique_port "Admin UI" "$ADMIN_PORT" "$PORT" "80" "443" "$MINIO_PORT"
-ensure_unique_port "Cinny" "$CINNY_PORT" "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT"
-ensure_unique_port "FluffyChat" "$FLUFFYCHAT_PORT" "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT"
+ensure_unique_port "MinIO" "$MINIO_PORT" "$PORT" "80" "443" "8448"
+ensure_unique_port "Admin UI" "$ADMIN_PORT" "$PORT" "80" "443" "8448" "$MINIO_PORT"
+ensure_unique_port "Cinny" "$CINNY_PORT" "$PORT" "80" "443" "8448" "$MINIO_PORT" "$ADMIN_PORT"
+ensure_unique_port "FluffyChat" "$FLUFFYCHAT_PORT" "$PORT" "80" "443" "8448" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT"
 [ -z "$SMTP_FROM" ] && SMTP_FROM="${SMTP_USER}"
 
 SMTP_ENABLED=false
