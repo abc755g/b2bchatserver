@@ -11,9 +11,9 @@
 
 Если выбираете VDS и регистраторов доменов, мы рекомендуем проверенные компании с оптимальным соотношением "цена-качество":
 
-- firstVDS: `https://firstvds.ru/?from=519065` (промокод `648519065` для скидки 25% на первый месяц)
-- Timeweb Cloud: `https://timeweb.cloud/?i=141497`
-- Selectel: `https://selectel.ru/?ref_code=beeabc92bf`
+- firstVDS: [https://firstvds.ru/?from=519065](https://firstvds.ru/?from=519065) (промокод `648519065` для скидки 25% на первый месяц)
+- Timeweb Cloud: [https://timeweb.cloud/?i=141497](https://timeweb.cloud/?i=141497)
+- Selectel: [https://selectel.ru/?ref_code=beeabc92bf](https://selectel.ru/?ref_code=beeabc92bf)
 
 Подробные пошаговые инструкции для каждого провайдера:
 
@@ -54,12 +54,12 @@
 **Открытые порты:** 80, 443, 8448  
 **Со звонками:** дополнительно 3478 UDP/TCP, 49152–49200 UDP
 
-> Если сервер находится в облаке (Hetzner, Timeweb, VK Cloud и др.) — откройте порты также в панели провайдера (Firewall / Security Groups).
+> Если сервер находится в облаке (Timeweb, VK Cloud и др.) — откройте порты также в панели провайдера (Firewall / Security Groups).
 
 ## Установка
 
 ```bash
-curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/install.sh -o /tmp/b2b-install.sh && sudo bash /tmp/b2b-install.sh
 ```
 
 Скрипт задаст вопросы о домене, паролях, компонентах и запустит всё автоматически.
@@ -98,7 +98,6 @@ curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/ins
 
 **Мобильные клиенты:**
 - **FluffyChat** (iOS/Android)
-- **SchildiChat** (Android, форк Element с дополнительными настройками)
 - **Element X** (iOS/Android, новое поколение клиента от Element)
 
 При использовании любого клиента указывайте homeserver:
@@ -125,6 +124,7 @@ curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/ins
 ./manage.sh password-reset     # Сбросить пароль пользователя
 ./manage.sh ssl-renew          # Принудительно обновить SSL
 ./manage.sh media-clean        # Очистить кэш медиафайлов
+./manage.sh wipe               # Полная очистка (удаляет данные и конфиги)
 ./manage.sh info               # Адреса, статус, порты
 ```
 

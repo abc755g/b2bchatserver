@@ -26,9 +26,9 @@ usage() {
     echo "  --port           Порт HTTPS основного домена (по умолчанию: 443)"
     echo "  --minio          Включить MinIO для S3-медиа"
     echo "  --minio-port     Порт MinIO Console          (по умолчанию: случайный)"
-    echo "  --admin-port     Порт Synapse Admin          (по умолчанию: 8444)"
-    echo "  --cinny-port     Порт Cinny                  (по умолчанию: 8445)"
-    echo "  --fluffychat-port Порт FluffyChat            (по умолчанию: 8446)"
+    echo "  --admin-port     Порт Synapse Admin          (по умолчанию: случайный)"
+    echo "  --cinny-port     Порт Cinny                  (по умолчанию: случайный)"
+    echo "  --fluffychat-port Порт FluffyChat            (по умолчанию: случайный)"
     echo "  --calls          Включить звонки (Coturn + LiveKit)"
     echo "  --open-registration  Открытая регистрация пользователей"
     echo "  --max-upload     Макс. размер файла          (по умолчанию: 500M)"
@@ -90,6 +90,8 @@ USE_CALLS=false
 USE_MINIO=false
 OPEN_REGISTRATION=false
 MAX_UPLOAD="500M"
+FEDERATION_MODE="whitelist"
+FEDERATION_SERVERS=""
 
 SMTP_HOST=""
 SMTP_PORT=""
@@ -130,6 +132,8 @@ while [[ $# -gt 0 ]]; do
         --minio)            USE_MINIO=true;        shift ;;
         --open-registration) OPEN_REGISTRATION=true; shift ;;
         --max-upload)       MAX_UPLOAD="$2";       shift 2 ;;
+        --federation-mode)    FEDERATION_MODE="$2";    shift 2 ;;
+        --federation-servers) FEDERATION_SERVERS="$2"; shift 2 ;;
         --smtp-host)        SMTP_HOST="$2";        shift 2 ;;
         --smtp-port)        SMTP_PORT="$2";        shift 2 ;;
         --smtp-user)        SMTP_USER="$2";        shift 2 ;;
@@ -223,10 +227,63 @@ $REINSTALL      && INSTALL_MODE="reinstall"
 
 # Рандомные порты для скрытых сервисов (20000–60000)
 rand_port() { shuf -i 20000-60000 -n 1; }
-$USE_MINIO && [ -z "$MINIO_PORT" ] && MINIO_PORT=$(rand_port)
-[ -z "$ADMIN_PORT" ]      && ADMIN_PORT=$(rand_port)
-[ -z "$CINNY_PORT" ]      && CINNY_PORT=$(rand_port)
-[ -z "$FLUFFYCHAT_PORT" ] && FLUFFYCHAT_PORT=$(rand_port)
+
+is_valid_port() {
+    local _p="$1"
+    [[ "$_p" =~ ^[0-9]+$ ]] && [ "$_p" -ge 1 ] && [ "$_p" -le 65535 ]
+}
+
+ensure_unique_port() {
+    local _name="$1" _port="$2"
+    shift 2
+    local _existing
+    for _existing in "$@"; do
+        [ -z "$_existing" ] && continue
+        [ "$_port" = "$_existing" ] && err "Конфликт портов: ${_name} использует порт ${_port}, который уже занят другим сервисом."
+    done
+}
+
+next_unique_random_port() {
+    local _candidate
+    while true; do
+        _candidate=$(rand_port)
+        local _conflict=false
+        local _existing
+        for _existing in "$@"; do
+            [ "$_candidate" = "$_existing" ] && _conflict=true && break
+        done
+        if [ "$_conflict" = "false" ]; then
+            echo "$_candidate"
+            return
+        fi
+    done
+}
+
+is_valid_port "$PORT" || err "Некорректный порт Element/Synapse: ${PORT} (допустимо: 1-65535)"
+[ "$PORT" = "80" ] && err "Порт Element/Synapse не может быть 80: этот порт зарезервирован под HTTP-челленджи Let's Encrypt."
+
+[ -n "$MINIO_PORT" ]      && is_valid_port "$MINIO_PORT"      || [ -z "$MINIO_PORT" ]      || err "Некорректный порт MinIO: ${MINIO_PORT}"
+[ -n "$ADMIN_PORT" ]      && is_valid_port "$ADMIN_PORT"      || [ -z "$ADMIN_PORT" ]      || err "Некорректный порт Admin UI: ${ADMIN_PORT}"
+[ -n "$CINNY_PORT" ]      && is_valid_port "$CINNY_PORT"      || [ -z "$CINNY_PORT" ]      || err "Некорректный порт Cinny: ${CINNY_PORT}"
+[ -n "$FLUFFYCHAT_PORT" ] && is_valid_port "$FLUFFYCHAT_PORT" || [ -z "$FLUFFYCHAT_PORT" ] || err "Некорректный порт FluffyChat: ${FLUFFYCHAT_PORT}"
+
+# Сначала проверяем пользовательские порты на дубли, затем генерируем отсутствующие.
+# 80 зарезервирован под HTTP-челленджи, 443 занят основным HTTPS server-блоком nginx.
+[ -n "$MINIO_PORT" ]      && ensure_unique_port "MinIO" "$MINIO_PORT" "$PORT" "80" "443"
+[ -n "$ADMIN_PORT" ]      && ensure_unique_port "Admin UI" "$ADMIN_PORT" "$PORT" "80" "443" "$MINIO_PORT"
+[ -n "$CINNY_PORT" ]      && ensure_unique_port "Cinny" "$CINNY_PORT" "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT"
+[ -n "$FLUFFYCHAT_PORT" ] && ensure_unique_port "FluffyChat" "$FLUFFYCHAT_PORT" "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT"
+
+$USE_MINIO && [ -z "$MINIO_PORT" ] && MINIO_PORT=$(next_unique_random_port "$PORT" "80" "443")
+[ -z "$ADMIN_PORT" ]      && ADMIN_PORT=$(next_unique_random_port "$PORT" "80" "443" "$MINIO_PORT")
+[ -z "$CINNY_PORT" ]      && CINNY_PORT=$(next_unique_random_port "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT")
+[ -z "$FLUFFYCHAT_PORT" ] && FLUFFYCHAT_PORT=$(next_unique_random_port "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT")
+
+# Финальная проверка (включая случайно сгенерированные значения)
+ensure_unique_port "MinIO" "$MINIO_PORT" "$PORT" "80" "443"
+ensure_unique_port "Admin UI" "$ADMIN_PORT" "$PORT" "80" "443" "$MINIO_PORT"
+ensure_unique_port "Cinny" "$CINNY_PORT" "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT"
+ensure_unique_port "FluffyChat" "$FLUFFYCHAT_PORT" "$PORT" "80" "443" "$MINIO_PORT" "$ADMIN_PORT" "$CINNY_PORT"
 [ -z "$SMTP_FROM" ] && SMTP_FROM="${SMTP_USER}"
 
 SMTP_ENABLED=false
@@ -395,15 +452,6 @@ if ! $DNS_OK; then
     printf "  %-12s %s\n" "Адрес:" "${SERVER_IP}"
     printf "  %-12s %s\n" "TTL:"   "300 (или минимальное доступное)"
     echo ""
-    echo "  Где найти настройки DNS:"
-    echo "  • Hetzner     — Cloud Console → Networking → DNS"
-    echo "  • Timeweb     — Панель → Домены → DNS-записи"
-    echo "  • REG.RU      — Домены → Управление DNS"
-    echo "  • Beget       — Домены → Настройки DNS"
-    echo "  • Selectel    — Сеть → DNS"
-    echo "  • VK Cloud    — DNS → Зоны"
-    echo "  • 2domains    — Управление доменом → DNS"
-    echo ""
     echo "  После добавления записи подождите 5–30 минут (DNS распространяется)."
     echo "  Затем запустите install.sh снова."
     echo ""
@@ -475,6 +523,26 @@ signing_key_path: /data/${SERVER_NAME}.signing.key
 enable_registration: ${ENABLE_REG}
 registration_shared_secret: "${REG_SECRET}"
 enable_registration_captcha: false
+
+$(case "${FEDERATION_MODE}" in
+    closed)
+        echo "federation_domain_whitelist: []"
+        echo "block_non_local_invites: true"
+        echo "allow_public_rooms_over_federation: false"
+        ;;
+    whitelist)
+        echo "block_non_local_invites: true"
+        echo "allow_public_rooms_over_federation: false"
+        if [ -n "${FEDERATION_SERVERS}" ]; then
+            echo "federation_domain_whitelist:"
+            echo "${FEDERATION_SERVERS}" | tr ',' '\n' | while IFS= read -r _srv; do
+                [ -n "$_srv" ] && echo "  - ${_srv}"
+            done
+        else
+            echo "federation_domain_whitelist: []"
+        fi
+        ;;
+esac)
 
 report_stats: false
 suppress_key_server_warning: true
@@ -569,6 +637,8 @@ INSTALL_S3_BUCKET=${S3_BUCKET}
 INSTALL_S3_DAYS=${S3_DAYS}
 INSTALL_BACKUP_MEDIA=${BACKUP_MEDIA}
 INSTALL_BACKUP_SCHEDULE=${BACKUP_SCHEDULE}
+INSTALL_FEDERATION_MODE=${FEDERATION_MODE}
+INSTALL_FEDERATION_SERVERS=${FEDERATION_SERVERS}
 ENV
 
 # homeserver.yaml
@@ -710,7 +780,7 @@ COMPOSE
 else
     cat >> ./docker-compose.yml << COMPOSE
   synapse:
-    image: matrixdotorg/synapse:latest
+    image: matrixdotorg/synapse:v1.151.0
     restart: unless-stopped
     depends_on:
       postgres:
@@ -736,7 +806,7 @@ fi
 if $USE_ELEMENT; then
     cat >> ./docker-compose.yml << COMPOSE
   element:
-    image: vectorim/element-web:latest
+    image: vectorim/element-web:v1.12.15
     restart: unless-stopped
     volumes:
       - ./config/element/config.json:/app/config.json:ro
@@ -749,7 +819,7 @@ fi
 if $USE_CINNY; then
     cat >> ./docker-compose.yml << COMPOSE
   cinny:
-    image: ajbura/cinny:latest
+    image: ajbura/cinny:v4.11.1
     restart: unless-stopped
     volumes:
       - ./config/cinny/config.json:/app/config.json:ro
@@ -762,7 +832,7 @@ fi
 if $USE_FLUFFYCHAT; then
     cat >> ./docker-compose.yml << COMPOSE
   fluffychat:
-    image: fluffychat/fluffychat-web:latest
+    image: ghcr.io/krille-chan/fluffychat:v2.5.1
     restart: unless-stopped
     networks:
       - matrix_net
@@ -773,7 +843,7 @@ fi
 # Synapse Admin + certbot + nginx — всегда
 cat >> ./docker-compose.yml << COMPOSE
   synapse-admin:
-    image: awesometechnologies/synapse-admin:latest
+    image: awesometechnologies/synapse-admin:0.11.4
     restart: unless-stopped
     networks:
       - matrix_net
@@ -783,7 +853,7 @@ COMPOSE
 if $USE_MINIO; then
     cat >> ./docker-compose.yml << COMPOSE
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -819,10 +889,10 @@ cat >> ./docker-compose.yml << COMPOSE
     ports:
       - "80:80"
       - "${PORT}:443"
-      - "${ADMIN_PORT}:8444"
+      - "${ADMIN_PORT}:${ADMIN_PORT}"
 COMPOSE
 
-$USE_MINIO      && echo "      - \"${MINIO_PORT}:8443\""          >> ./docker-compose.yml
+$USE_MINIO      && echo "      - \"${MINIO_PORT}:${MINIO_PORT}\"" >> ./docker-compose.yml
 $USE_CINNY      && echo "      - \"${CINNY_PORT}:${CINNY_PORT}\"" >> ./docker-compose.yml
 $USE_FLUFFYCHAT && echo "      - \"${FLUFFYCHAT_PORT}:${FLUFFYCHAT_PORT}\"" >> ./docker-compose.yml
 
@@ -848,7 +918,7 @@ if $USE_CALLS; then
     command: -c /etc/coturn/turnserver.conf
 
   livekit:
-    image: livekit/livekit-server:v1
+    image: livekit/livekit-server:v1.11.0
     restart: unless-stopped
     command: --config /etc/livekit/livekit.yaml
     volumes:
@@ -861,7 +931,7 @@ if $USE_CALLS; then
       - matrix_net
 
   livekit-jwt:
-    image: ghcr.io/element-hq/lk-jwt-service:latest
+    image: ghcr.io/element-hq/lk-jwt-service:0.4.3
     restart: unless-stopped
     environment:
       LIVEKIT_URL: wss://${DOMAIN}/livekit/
@@ -1041,7 +1111,7 @@ if $USE_MINIO; then
 cat >> ./config/nginx/matrix.conf << NGINX
 # ── MinIO Console ─────────────────────────────────────────
 server {
-    listen 8443 ssl http2;
+    listen ${MINIO_PORT} ssl http2;
     server_name ${DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
@@ -1067,7 +1137,7 @@ fi
 cat >> ./config/nginx/matrix.conf << NGINX
 # ── Synapse Admin ─────────────────────────────────────────
 server {
-    listen 8444 ssl http2;
+    listen ${ADMIN_PORT} ssl http2;
     server_name ${DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;

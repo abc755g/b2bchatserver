@@ -8,6 +8,10 @@ warn()  { echo -e "${YELLOW}[!!]${NC} $*"; }
 err()   { echo -e "${RED}[ERR]${NC} $*"; exit 1; }
 title() { echo -e "\n${CYAN}$*${NC}"; }
 
+if [ "$(id -u)" -ne 0 ]; then
+    err "Скрипт должен быть запущен от root. Используйте: sudo bash $0"
+fi
+
 # ── Вспомогательные функции ввода ─────────────────────────
 ask() {
     local prompt="$1" default="$2" result
@@ -204,7 +208,7 @@ done
     { warn "Порты заняты:${PORTS_BUSY}"; warn "Убедитесь что порты будут освобождены перед запуском"; }
 
 echo ""
-warn "Если ваш сервер в облаке (Hetzner, Timeweb, VK Cloud, Selectel и др.) —"
+warn "Если ваш сервер в облаке (Timeweb, VK Cloud, Selectel и др.) —"
 warn "откройте порты 80, 443, 8448 также в панели провайдера (Firewall / Security Groups)."
 warn "Настройка ufw на сервере не заменяет облачный файрвол."
 echo ""
@@ -275,7 +279,7 @@ echo ""
 USE_CALLS=true
 if $ADVANCED_SETUP; then
     USE_CALLS=false
-    if ask_yn "Подтвердите включение звонков и видео (Coturn + LiveKit)?" "$(prev_bool INSTALL_USE_CALLS 'y')"; then
+    if ask_yn "Подтвердите включение звонков и видео (Coturn + LiveKit)?" "$(prev_bool INSTALL_USE_CALLS 'true')"; then
         USE_CALLS=true
         log "Звонки: включены"
     else
@@ -364,7 +368,7 @@ echo ""
 
 USE_MINIO=false
 if $ADVANCED_SETUP; then
-    if ask_yn "Подтвердите включение S3-хранилища медиа (MinIO)?" "$(prev_bool INSTALL_USE_MINIO 'n')"; then
+    if ask_yn "Подтвердите включение S3-хранилища медиа (MinIO)?" "$(prev_bool INSTALL_USE_MINIO 'false')"; then
         USE_MINIO=true
         log "MinIO: включен"
     else
@@ -490,7 +494,7 @@ if $ADVANCED_SETUP; then
     fi
 
     echo ""
-    if ask_yn "Подтвердите бэкап медиафайлов?" "$(prev_bool INSTALL_BACKUP_MEDIA 'n')"; then
+    if ask_yn "Подтвердите бэкап медиафайлов?" "$(prev_bool INSTALL_BACKUP_MEDIA 'false')"; then
         BACKUP_MEDIA=true
     fi
 
@@ -609,9 +613,61 @@ else
     log "Регистрация: только через администратора (рекомендуемый режим)"
 fi
 
-# ── Блок 10: Email уведомления ────────────────────────────
+# ── Блок 10: Федерация ───────────────────────────────────
 if $ADVANCED_SETUP; then
-    title "Блок 10 — Email уведомления"
+    title "Блок 10 — Федерация"
+fi
+echo ""
+
+FEDERATION_MODE="whitelist"
+FEDERATION_SERVERS=""
+
+_FED_PREV=$(prev_val INSTALL_FEDERATION_MODE "whitelist")
+_FED_DEFAULT="1"
+[ "$_FED_PREV" = "open" ]   && _FED_DEFAULT="3"
+[ "$_FED_PREV" = "closed" ] && _FED_DEFAULT="2"
+
+info "Федерация — возможность общаться с пользователями других Matrix-серверов."
+echo ""
+echo "  [1] Whitelist   — только указанные серверы (рекомендуется)"
+echo "  [2] Закрытая    — изолированный контур"
+echo "  [3] Открытая    — общение со всем Matrix-миром"
+echo ""
+read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_FED_DEFAULT}]: ")" _FED_CHOICE </dev/tty
+_FED_CHOICE="${_FED_CHOICE:-${_FED_DEFAULT}}"
+
+case "$_FED_CHOICE" in
+    2)
+        FEDERATION_MODE="closed"
+        log "Федерация: закрытая — изолированный контур"
+        ;;
+    3)
+        FEDERATION_MODE="open"
+        warn "Федерация: открытая — пользователи смогут общаться со всем Matrix-миром"
+        ;;
+    *)
+        FEDERATION_MODE="whitelist"
+        echo ""
+        info "Введите домены серверов, с которыми разрешено общение."
+        info "Пустая строка — завершить. Можно оставить пустым и добавить позже."
+        echo ""
+        _PREV_SERVERS=$(prev_val INSTALL_FEDERATION_SERVERS "")
+        [ -n "$_PREV_SERVERS" ] && info "Текущие серверы: ${_PREV_SERVERS//,/, }" && echo ""
+        while true; do
+            read -rp "$(echo -e "${BLUE}?${NC} Сервер (или Enter для завершения): ")" _SRV </dev/tty
+            [ -z "$_SRV" ] && break
+            FEDERATION_SERVERS="${FEDERATION_SERVERS:+${FEDERATION_SERVERS},}${_SRV}"
+            log "Добавлен: ${_SRV}"
+        done
+        [ -n "$FEDERATION_SERVERS" ] \
+            && log "Федерация: whitelist (${FEDERATION_SERVERS//,/, })" \
+            || log "Федерация: whitelist (серверы добавите позже через ./manage.sh federation)"
+        ;;
+esac
+
+# ── Блок 11: Email уведомления ────────────────────────────
+if $ADVANCED_SETUP; then
+    title "Блок 11 — Email уведомления"
 fi
 echo ""
 
@@ -623,7 +679,7 @@ SMTP_PASS=""
 SMTP_FROM=$(prev_val INSTALL_SMTP_FROM "")
 
 if $ADVANCED_SETUP; then
-    _SMTP_DEFAULT=$(prev_bool INSTALL_SMTP_ENABLED "n")
+    _SMTP_DEFAULT=$(prev_bool INSTALL_SMTP_ENABLED "false")
     [ -n "$(prev_val INSTALL_SMTP_HOST '')" ] && _SMTP_DEFAULT="y"
 
     if ask_yn "Подтвердите настройку email уведомлений?" "$_SMTP_DEFAULT"; then
@@ -699,9 +755,9 @@ else
     log "Email: отключен (рекомендуемый режим)"
 fi
 
-# ── Блок 11: Лимиты ──────────────────────────────────────
+# ── Блок 12: Лимиты ──────────────────────────────────────
 if $ADVANCED_SETUP; then
-    title "Блок 11 — Лимиты"
+    title "Блок 12 — Лимиты"
 fi
 echo ""
 
@@ -731,16 +787,16 @@ if $RESOURCE_WARN; then
     warn "Сервер не соответствует рекомендуемым требованиям."
     warn "Система может работать нестабильно."
     echo ""
-    if ! ask_yn "Подтвердите продолжение установки (введите y — продолжить, n — отменить)" "n"; then
+    if ! ask_yn "Подтвердите продолжение установки?" "n"; then
         warn "Установка отменена."
         exit 0
     fi
     echo ""
 fi
 
-# ── Блок 12: Подтверждение ────────────────────────────────
+# ── Блок 13: Подтверждение ────────────────────────────────
 if $ADVANCED_SETUP; then
-    title "Блок 12 — Подтверждение настроек"
+    title "Блок 13 — Подтверждение настроек"
 else
     title "Подтверждение настроек"
 fi
@@ -765,6 +821,11 @@ if $OPEN_REGISTRATION; then
 else
     printf "║  Регистрация:     %-39s ║\n" "только через администратора"
 fi
+_FED_LABEL="whitelist (пустой)"
+[ "$FEDERATION_MODE" = "closed" ]   && _FED_LABEL="закрытая"
+[ "$FEDERATION_MODE" = "open" ]     && _FED_LABEL="открытая"
+[ "$FEDERATION_MODE" = "whitelist" ] && [ -n "$FEDERATION_SERVERS" ] && _FED_LABEL="whitelist: ${FEDERATION_SERVERS//,/, }"
+printf "║  Федерация:       %-39s ║\n" "$_FED_LABEL"
 echo "╠══════════════════════════════════════════════════════════╣"
 if $USE_B2B; then
     printf "║  Клиент:          %-39s ║\n" "B2B-связи"
@@ -887,6 +948,8 @@ fi
 
 $USE_CALLS         && PARAMS="${PARAMS} --calls"
 $OPEN_REGISTRATION && PARAMS="${PARAMS} --open-registration"
+PARAMS="${PARAMS} --federation-mode ${FEDERATION_MODE}"
+[ -n "$FEDERATION_SERVERS" ] && PARAMS="${PARAMS} --federation-servers ${FEDERATION_SERVERS}"
 
 if $SMTP_ENABLED && [ -n "$SMTP_PASS" ]; then
     PARAMS="${PARAMS} --smtp-host ${SMTP_HOST} --smtp-port ${SMTP_PORT}"
@@ -939,6 +1002,7 @@ echo "║  ./manage.sh federation         Управление федераци�
 echo "║  ./manage.sh password-reset     Экстренный сброс пароля ║"
 echo "║  ./manage.sh ssl-renew          Обновить SSL вручную    ║"
 echo "║  ./manage.sh media-clean        Очистить кэш медиа      ║"
+echo "║  ./manage.sh wipe               Полная очистка данных   ║"
 echo "║  ./manage.sh info               Адреса, статус, порты   ║"
 echo "╠══════════════════════════════════════════════════════════╣"
 echo "║  ./install.sh                   Изменить настройки      ║"

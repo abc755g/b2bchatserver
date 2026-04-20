@@ -57,6 +57,7 @@ usage() {
     echo "  password-reset     Экстренный сброс пароля администратора"
     echo "  ssl-renew          Принудительное обновление SSL-сертификата"
     echo "  media-clean        Очистить кэш медиафайлов (освободить место)"
+    echo "  wipe               Полная очистка установки (контейнеры, тома, конфиг)"
     echo "  info               Показать адреса, статус и порты"
     echo ""
 }
@@ -531,6 +532,44 @@ case "$COMMAND" in
             warn "Отменено"
             echo ""
         fi
+        ;;
+
+    wipe)
+        echo ""
+        warn "Полная очистка удалит:"
+        echo "  • контейнеры и docker volumes (БД, медиа, сертификаты)"
+        echo "  • локальные файлы установки (.env, docker-compose.yml, backup.sh)"
+        echo "  • сгенерированные конфиги Synapse/nginx и порт-лист"
+        echo ""
+        read -rp "$(echo -e "${RED}[!!]${NC} Для подтверждения введите WIPE: ")" _WIPE_CONFIRM
+        if [ "$_WIPE_CONFIRM" != "WIPE" ]; then
+            warn "Отменено"
+            echo ""
+            exit 0
+        fi
+        read -rp "$(echo -e "${RED}[!!]${NC} Точно выполнить полную очистку? [y/N]: ")" _WIPE_FINAL
+        if [[ ! "$_WIPE_FINAL" =~ ^[Yy]$ ]]; then
+            warn "Отменено"
+            echo ""
+            exit 0
+        fi
+
+        info "Останавливаем стек и удаляем контейнеры/тома..."
+        docker compose down -v --remove-orphans 2>/dev/null || true
+
+        info "Удаляем локальные файлы и сгенерированные конфиги..."
+        rm -f ./.env ./docker-compose.yml ./backup.sh ./ports.txt
+        rm -f ./config/nginx/matrix.conf ./config/nginx/matrix.conf.bak
+        rm -f ./config/synapse/homeserver.yaml ./config/synapse/Dockerfile
+        rm -f ./config/synapse/*.signing.key 2>/dev/null || true
+        rm -rf ./config/element ./config/cinny ./config/coturn ./config/livekit
+
+        # Крон бэкапов создаётся в /etc/cron.d/matrix-backup, удаляем при наличии прав.
+        rm -f /etc/cron.d/matrix-backup 2>/dev/null || true
+
+        log "Полная очистка завершена"
+        info "Для новой установки выполните: ./install.sh"
+        echo ""
         ;;
 
     *)
