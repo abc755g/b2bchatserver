@@ -434,10 +434,15 @@ case "$COMMAND" in
         fi
 
         info "Генерируем хэш пароля..."
-        _HASH=$(docker compose exec -T synapse hash_password -p "$_NEW_PASS" 2>/dev/null | tr -d '\r\n')
-
-        if [ -z "$_HASH" ]; then
-            err "Не удалось сгенерировать хэш. Убедитесь что Synapse запущен."
+        _HASH_OUTPUT=$(docker compose exec -T synapse hash_password -c /data/homeserver.yaml -p "$_NEW_PASS" 2>&1 | tr -d '\r\n')
+        _HASH_CODE=$?
+        if [ $_HASH_CODE -ne 0 ]; then
+            err "Не удалось сгенерировать хэш: ${_HASH_OUTPUT}"
+        fi
+        if [ -n "$_HASH_OUTPUT" ] && echo "$_HASH_OUTPUT" | grep -q '^\$2'; then
+            _HASH="$_HASH_OUTPUT"
+        else
+            err "Команда hash_password вернула неожиданный результат: ${_HASH_OUTPUT}"
         fi
 
         info "Обновляем пароль в базе данных..."

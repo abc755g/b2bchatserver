@@ -522,6 +522,19 @@ turn_allow_guests: false
 TURN
 fi)
 
+$(if $USE_CALLS; then cat << RTC
+experimental_features:
+  msc3266_enabled: true
+  msc4222_enabled: true
+  msc4143_enabled: true
+
+matrix_rtc:
+  transports:
+    - type: livekit
+      livekit_service_url: "https://${DOMAIN}/livekit-jwt"
+RTC
+fi)
+
 log_config: /data/log.config
 signing_key_path: /data/${SERVER_NAME}.signing.key
 
@@ -686,10 +699,7 @@ if $USE_CINNY; then
 {
     "defaultHomeserver": 0,
     "homeserverList": [
-        {
-            "name": "${SERVER_NAME}",
-            "url": "https://${DOMAIN}"
-        }
+        "${DOMAIN}"
     ],
     "allowCustomHomeservers": false
 }
@@ -966,6 +976,12 @@ cat >> ./docker-compose.yml << COMPOSE
 COMPOSE
 
 # ── Генерируем nginx конфиг ───────────────────────────────
+if $USE_CALLS; then
+    WELL_KNOWN_CLIENT_JSON="{\"m.homeserver\":{\"base_url\":\"https://${DOMAIN}\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://${DOMAIN}/livekit-jwt\"}]}"
+else
+    WELL_KNOWN_CLIENT_JSON="{\"m.homeserver\":{\"base_url\":\"https://${DOMAIN}\"}}"
+fi
+
 cat > ./config/nginx/matrix.conf << NGINX
 # ── HTTP → HTTPS ──────────────────────────────────────────
 server {
@@ -1034,7 +1050,9 @@ cat >> ./config/nginx/matrix.conf << NGINX
     location /.well-known/matrix/client {
         default_type application/json;
         add_header Access-Control-Allow-Origin *;
-        return 200 '{"m.homeserver":{"base_url":"https://${DOMAIN}"}}';
+        add_header Access-Control-Allow-Methods 'GET, OPTIONS';
+        add_header Access-Control-Allow-Headers 'Origin, X-Requested-With, Content-Type, Accept, Authorization';
+        return 200 '${WELL_KNOWN_CLIENT_JSON}';
     }
 
     location /health {
@@ -1256,22 +1274,29 @@ fi
 if [ "$INSTALL_MODE" = "install" ] || [ "$INSTALL_MODE" = "reinstall" ]; then
     if [ -n "$ADMIN_PASS" ]; then
         info "Создаём пользователя ${ADMIN_USER}..."
-        docker compose exec -T synapse \
+        _REG_OUTPUT=$(docker compose exec -T synapse \
             register_new_matrix_user -c /data/homeserver.yaml \
             -u "${ADMIN_USER}" -p "${ADMIN_PASS}" -a \
-            http://localhost:8008 2>/dev/null && \
-            log "Пользователь @${ADMIN_USER}:${SERVER_NAME} создан" || \
-            warn "Пользователь ${ADMIN_USER} уже существует"
+            http://localhost:8008 2>&1)
+        _REG_CODE=$?
+        if [ $_REG_CODE -eq 0 ]; then
+            log "Пользователь @${ADMIN_USER}:${SERVER_NAME} создан"
+        elif echo "$_REG_OUTPUT" | grep -qi "already"; then
+            warn "Пользователь ${ADMIN_USER} уже существует — пароль не изменён"
+        else
+            warn "Не удалось создать пользователя ${ADMIN_USER}: ${_REG_OUTPUT}"
+            warn "Войдите в Synapse Admin UI и создайте администратора вручную"
+        fi
     fi
 elif [ "$INSTALL_MODE" = "modify" ] && [ -n "$ADMIN_PASS" ]; then
     info "Обновляем пароль ${ADMIN_USER}..."
-    _NEW_HASH=$(docker compose exec -T synapse hash_password -p "$ADMIN_PASS" 2>/dev/null | tr -d '\r\n')
-    if [ -n "$_NEW_HASH" ]; then
+    _NEW_HASH=$(docker compose exec -T synapse hash_password -c /data/homeserver.yaml -p "$ADMIN_PASS" 2>&1 | tr -d '\r\n')
+    if [ -n "$_NEW_HASH" ] && echo "$_NEW_HASH" | grep -q '^\$2'; then
         docker compose exec -T postgres psql -U synapse -c \
             "UPDATE users SET password_hash='${_NEW_HASH}' WHERE name='@${ADMIN_USER}:${SERVER_NAME}';" \
-            2>/dev/null && log "Пароль администратора обновлён" || warn "Не удалось обновить пароль"
+            2>/dev/null && log "Пароль администратора обновлён" || warn "Не удалось обновить пароль в БД"
     else
-        warn "Не удалось изменить пароль (hash_password не ответил)"
+        warn "Не удалось получить хэш пароля: ${_NEW_HASH}"
     fi
 fi
 
