@@ -125,6 +125,9 @@ case "$COMMAND" in
         warn "Перед обновлением рекомендуется сделать бэкап: ./manage.sh backup"
         echo ""
         docker compose pull
+        # Версии образов запинены в start.sh: pull подтянет только пересобранные
+        # теги. Смена версии — перезапуск start.sh новой ревизии.
+        docker compose build --pull 2>/dev/null || true
         info "Перезапускаем сервисы с новыми образами..."
         docker compose up -d --remove-orphans
         info "Удаляем старые образы..."

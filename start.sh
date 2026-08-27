@@ -113,6 +113,23 @@ REINSTALL=false
 ENV_FILE=""
 ALLOW_DIRECT_RUN=false
 
+# ── Версии образов (пины) ─────────────────────────────────
+# Обновлять только вместе: сверьтесь с upgrade notes соответствующего проекта.
+IMG_SYNAPSE="matrixdotorg/synapse:v1.159.0"
+IMG_POSTGRES="postgres:16.15-alpine"
+IMG_ELEMENT="vectorim/element-web:v1.12.26"
+IMG_CINNY="ajbura/cinny:v4.12.6"
+IMG_FLUFFYCHAT="ghcr.io/krille-chan/fluffychat:v2.9.1"
+IMG_SYNAPSE_ADMIN="awesometechnologies/synapse-admin:0.11.4"
+IMG_MINIO="minio/minio:RELEASE.2025-09-07T16-13-09Z"
+IMG_NGINX="nginx:1.31.4-alpine"
+IMG_CERTBOT="certbot/certbot:v5.7.0"
+IMG_COTURN="coturn/coturn:4.17.2-alpine"
+IMG_LIVEKIT="livekit/livekit-server:v1.13.6"
+IMG_LK_JWT="ghcr.io/element-hq/lk-jwt-service:0.6.0"
+# Пакет S3-провайдера медиа (ставится в образ Synapse при --minio)
+PKG_S3_PROVIDER="synapse-s3-storage-provider==1.7.0"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --domain)           DOMAIN="$2";           shift 2 ;;
@@ -604,8 +621,8 @@ YAML
 # Генерируем Dockerfile для Synapse если нужен S3-провайдер
 if $USE_MINIO; then
     cat > ./config/synapse/Dockerfile << DOCKERFILE
-FROM matrixdotorg/synapse:latest
-RUN pip install matrix-synapse-s3-storage-provider --quiet
+FROM ${IMG_SYNAPSE}
+RUN pip install ${PKG_S3_PROVIDER} --quiet
 DOCKERFILE
 fi
 
@@ -748,7 +765,7 @@ cat > ./docker-compose.yml << COMPOSE
 services:
 
   postgres:
-    image: postgres:16-alpine
+    image: ${IMG_POSTGRES}
     restart: unless-stopped
     environment:
       POSTGRES_USER: \${POSTGRES_USER}
@@ -795,7 +812,7 @@ COMPOSE
 else
     cat >> ./docker-compose.yml << COMPOSE
   synapse:
-    image: matrixdotorg/synapse:v1.151.0
+    image: ${IMG_SYNAPSE}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -821,7 +838,7 @@ fi
 if $USE_ELEMENT; then
     cat >> ./docker-compose.yml << COMPOSE
   element:
-    image: vectorim/element-web:v1.12.15
+    image: ${IMG_ELEMENT}
     restart: unless-stopped
     volumes:
       - ./config/element/config.json:/app/config.json:ro
@@ -834,7 +851,7 @@ fi
 if $USE_CINNY; then
     cat >> ./docker-compose.yml << COMPOSE
   cinny:
-    image: ajbura/cinny:v4.11.1
+    image: ${IMG_CINNY}
     restart: unless-stopped
     volumes:
       - ./config/cinny/config.json:/app/config.json:ro
@@ -847,7 +864,7 @@ fi
 if $USE_FLUFFYCHAT; then
     cat >> ./docker-compose.yml << COMPOSE
   fluffychat:
-    image: ghcr.io/krille-chan/fluffychat:v2.5.1
+    image: ${IMG_FLUFFYCHAT}
     restart: unless-stopped
     networks:
       - matrix_net
@@ -858,7 +875,7 @@ fi
 # Synapse Admin + certbot + nginx — всегда
 cat >> ./docker-compose.yml << COMPOSE
   synapse-admin:
-    image: awesometechnologies/synapse-admin:0.11.4
+    image: ${IMG_SYNAPSE_ADMIN}
     restart: unless-stopped
     networks:
       - matrix_net
@@ -868,7 +885,7 @@ COMPOSE
 if $USE_MINIO; then
     cat >> ./docker-compose.yml << COMPOSE
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: ${IMG_MINIO}
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -889,7 +906,7 @@ fi
 
 cat >> ./docker-compose.yml << COMPOSE
   certbot:
-    image: certbot/certbot:latest
+    image: ${IMG_CERTBOT}
     restart: unless-stopped
     volumes:
       - certbot_certs:/etc/letsencrypt
@@ -899,7 +916,7 @@ cat >> ./docker-compose.yml << COMPOSE
       - matrix_net
 
   nginx:
-    image: nginx:alpine
+    image: ${IMG_NGINX}
     restart: unless-stopped
     ports:
       - "80:80"
@@ -925,7 +942,7 @@ COMPOSE
 if $USE_CALLS; then
     cat >> ./docker-compose.yml << COMPOSE
   coturn:
-    image: coturn/coturn:alpine
+    image: ${IMG_COTURN}
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -933,7 +950,7 @@ if $USE_CALLS; then
     command: -c /etc/coturn/turnserver.conf
 
   livekit:
-    image: livekit/livekit-server:v1.11.0
+    image: ${IMG_LIVEKIT}
     restart: unless-stopped
     command: --config /etc/livekit/livekit.yaml
     volumes:
@@ -946,12 +963,13 @@ if $USE_CALLS; then
       - matrix_net
 
   livekit-jwt:
-    image: ghcr.io/element-hq/lk-jwt-service:0.4.3
+    image: ${IMG_LK_JWT}
     restart: unless-stopped
     environment:
       LIVEKIT_URL: wss://${DOMAIN}/livekit/
       LIVEKIT_KEY: \${LIVEKIT_API_KEY}
       LIVEKIT_SECRET: \${LIVEKIT_API_SECRET}
+      LIVEKIT_FULL_ACCESS_HOMESERVERS: ${SERVER_NAME}
     networks:
       - matrix_net
 
@@ -1186,7 +1204,7 @@ if [ ! -f "$SIGNING_KEY" ]; then
         -v "$(pwd)/config/synapse:/data" \
         -e SYNAPSE_SERVER_NAME=${SERVER_NAME} \
         -e SYNAPSE_REPORT_STATS=no \
-        matrixdotorg/synapse:latest generate 2>/dev/null | tail -3 || true
+        ${IMG_SYNAPSE} generate 2>/dev/null | tail -3 || true
     # Восстанавливаем homeserver.yaml после generate (он перезаписывает)
     generate_homeserver_yaml
     log "Signing key готов"
@@ -1241,7 +1259,9 @@ fi
 
 # ── Запуск стека ──────────────────────────────────────────
 info "Запускаем все сервисы..."
-docker compose up -d
+# --build: в режиме S3 Synapse собирается локально, и смена пина в Dockerfile
+# без пересборки не подхватится
+docker compose up -d --build
 
 info "Ждём Synapse (до 60 сек)..."
 for i in $(seq 1 60); do
