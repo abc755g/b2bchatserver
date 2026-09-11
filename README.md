@@ -25,7 +25,8 @@
 
 | Компонент     | Назначение                              | Версия образа              |
 |---------------|-----------------------------------------|----------------------------|
-| Synapse       | Matrix-сервер                           | `v1.159.0`                 |
+| Synapse       | Matrix-сервер (+ модуль политик `synapse-http-antispam`) | `v1.159.0` |
+| MAS           | Сервис аутентификации (Element X, SSO)  | `1.23.0`                   |
 | Element       | Веб-клиент (опционально)                | `v1.12.26`                 |
 | Cinny         | Альтернативный веб-клиент (опционально) | `v4.12.6`                  |
 | FluffyChat    | Ещё один веб-клиент (опционально)       | `v2.9.1`                   |
@@ -124,7 +125,13 @@ curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/ins
 ./manage.sh update             # Обновить образы Docker
 ./manage.sh backup             # Запустить бэкап прямо сейчас
 ./manage.sh registration       # Включить/выключить регистрацию
-./manage.sh federation         # Управление федерацией
+./manage.sh federation         # Управление федерацией (см. ниже)
+./manage.sh verify-domain --token T   # Опубликовать токен подтверждения домена
+./manage.sh backup-key         # Сохранить ключ подписи сервера
+./manage.sh admin-token        # Токен администратора для Admin UI
+./manage.sh oidc ...           # Вход через внешнего OIDC-провайдера (нужен MAS)
+./manage.sh mas ...            # Прямой вызов mas-cli manage
+./manage.sh mas-migrate        # Перенос аккаунтов Synapse → MAS
 ./manage.sh password-reset     # Сбросить пароль пользователя
 ./manage.sh ssl-renew          # Принудительно обновить SSL
 ./manage.sh media-clean        # Очистить кэш медиафайлов
@@ -150,20 +157,56 @@ curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/ins
 ./manage.sh backup
 ```
 
-> Signing key (`config/synapse/*.signing.key`) — критичный файл. При его потере нарушится федерация. Обязательно включите бэкапы.
+> Signing key (`config/synapse/*.signing.key`) — единственный файл, который нельзя
+> восстановить. При его потере другие серверы перестанут доверять вашему, и починить
+> это можно только сменой домена. Сохраните его отдельно сразу после установки:
+> `./manage.sh backup-key --out ~/matrix-signing-key`, затем унесите с сервера.
+
+## Аутентификация (MAS)
+
+Начиная с v1.2.0 в стек входит MAS — matrix-authentication-service. Он нужен для
+мобильного Element X и для входа через внешних провайдеров (SSO). Включён по
+умолчанию для новых установок; на существующем сервере включается через
+`./install.sh` → «изменить настройки», после чего аккаунты переносятся:
+
+```bash
+./manage.sh mas-migrate          # проверка, ничего не меняет
+./manage.sh mas-migrate --apply  # перенос; Synapse на это время останавливается
+```
+
+С MAS пароли и регистрация живут в нём, а не в Synapse:
+`./manage.sh password-reset` и `./manage.sh registration` это учитывают,
+токен для Admin UI выдаёт `./manage.sh admin-token`.
+
+Вход через внешнего OIDC-провайдера (корпоративный SSO, внешний портал):
+
+```bash
+./manage.sh oidc --issuer https://id.company.ru --client-id <ID> --name "Компания"
+```
+
+Команда печатает `redirect_uri`, который нужно зарегистрировать у провайдера.
+Локальный вход по паролю при этом остаётся — на случай недоступности провайдера.
 
 ## Федерация
 
-Matrix позволяет общаться с пользователями других серверов. Управление:
+Matrix позволяет общаться с пользователями других серверов. Режимы:
+- **Whitelist** — только указанные серверы (по умолчанию; напр. серверы партнёров)
+- **Закрытая** — изолированный контур, только внутренние пользователи
+- **Открытая** — общение со всем Matrix-миром (включая matrix.org)
 
 ```bash
-./manage.sh federation
+./manage.sh federation                        # меню
+./manage.sh federation --list                 # режим и список
+./manage.sh federation --add chat.partner.ru  # добавить сервер
+./manage.sh federation --remove chat.partner.ru
+./manage.sh federation --sync-from https://.../servers.json   # список по URL
+./manage.sh federation --mode open|closed|whitelist
+./manage.sh federation --test chat.partner.ru # проверить связность в обе стороны
 ```
 
-Режимы:
-- **Открытая** — общение со всем Matrix-миром (включая matrix.org)
-- **Закрытая** — изолированный контур, только внутренние пользователи
-- **Whitelist** — только указанные серверы (напр. серверы партнёров)
+Список читается Synapse только при старте, поэтому каждая команда перезапускает
+его сама. Подробно — [docs/federation.md](docs/federation.md); подключение к
+внешнему порталу или сервису — [docs/external-integration.md](docs/external-integration.md).
 
 ## Лицензия
 

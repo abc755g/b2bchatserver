@@ -36,6 +36,66 @@ hs_remove_block() {
     sed -i "/^${key}:/d" "$HOMESERVER_YAML" 2>/dev/null || true
 }
 
+# ── Хелперы: федерация ────────────────────────────────────
+fed_mode() {
+    # open — блока нет; closed — пустой список; whitelist — есть домены
+    if ! grep -q "^federation_domain_whitelist:" "$HOMESERVER_YAML" 2>/dev/null; then
+        echo "open"
+    elif [ -z "$(fed_list)" ]; then
+        echo "closed"
+    else
+        echo "whitelist"
+    fi
+}
+
+fed_list() {
+    grep -A 200 "^federation_domain_whitelist:" "$HOMESERVER_YAML" 2>/dev/null \
+        | sed '1d' | sed '/^[^ ]/q' | grep "^  - " | awk '{print $2}' || true
+}
+
+fed_write() {
+    # $@ — домены; пустой список = закрытая федерация
+    python3 - "$HOMESERVER_YAML" "$@" <<'PYEOF'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1]); domains = sys.argv[2:]
+text = path.read_text()
+text = re.sub(r"(?m)^federation_domain_whitelist:.*\n(?:  - .*\n)*", "", text)
+block = ("federation_domain_whitelist:\n" + "".join(f"  - {d}\n" for d in domains)) if domains \
+    else "federation_domain_whitelist: []\n"
+path.write_text(text.rstrip("\n") + "\n\n" + block)
+PYEOF
+    hs_set "allow_public_rooms_over_federation" "false"
+}
+
+fed_open() {
+    python3 - "$HOMESERVER_YAML" <<'PYEOF'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+path.write_text(re.sub(r"(?m)^federation_domain_whitelist:.*\n(?:  - .*\n)*", "", path.read_text()))
+PYEOF
+    hs_set "allow_public_rooms_over_federation" "true"
+}
+
+fed_restart() {
+    # Whitelist читается только при старте Synapse — без рестарта правка не действует
+    info "Перезапускаем Synapse, чтобы применить список федерации..."
+    docker compose restart synapse >/dev/null
+    log "Synapse перезапущен"
+}
+
+fed_valid_domain() {
+    [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]+)?$ ]]
+}
+
+# ── Хелперы: MAS ──────────────────────────────────────────
+mas_enabled() {
+    [ "$(grep "^INSTALL_USE_MAS=" .env | cut -d= -f2)" = "true" ]
+}
+
+mas_cli() {
+    docker compose exec -T mas mas-cli -c /config/config.yaml "$@"
+}
+
 # ── Справка ───────────────────────────────────────────────
 usage() {
     echo ""
@@ -53,7 +113,21 @@ usage() {
     echo "  update             Обновить образы и перезапустить"
     echo "  backup             Запустить бэкап прямо сейчас"
     echo "  registration       Управление регистрацией пользователей"
-    echo "  federation         Управление федерацией"
+    echo "  federation         Управление федерацией (без опций — меню)"
+    echo "    --list                    Показать режим и список серверов"
+    echo "    --add DOMAIN              Добавить сервер в whitelist"
+    echo "    --remove DOMAIN           Убрать сервер из whitelist"
+    echo "    --sync-from URL           Загрузить список серверов по URL"
+    echo "    --mode open|closed|whitelist  Сменить режим"
+    echo "    --test DOMAIN             Проверить связность с сервером"
+    echo "  verify-domain --token T   Опубликовать токен подтверждения домена"
+    echo "  backup-key [--out PATH]   Сохранить ключ подписи сервера"
+    echo "  admin-token               Выдать токен администратора для Admin UI"
+    echo "  oidc --issuer URL --client-id ID [--name NAME]"
+    echo "                            Вход через внешнего OIDC-провайдера (нужен MAS)"
+    echo "  oidc --disable            Отключить внешний вход"
+    echo "  mas <команда...>          Прямой вызов mas-cli manage (set-password и др.)"
+    echo "  mas-migrate [--apply]     Перенос аккаунтов Synapse в MAS (syn2mas)"
     echo "  password-reset     Экстренный сброс пароля администратора"
     echo "  ssl-renew          Принудительное обновление SSL-сертификата"
     echo "  media-clean        Очистить кэш медиафайлов (освободить место)"
@@ -65,11 +139,32 @@ usage() {
 # ── Парсинг аргументов ────────────────────────────────────
 COMMAND="${1:-}"
 SERVICE=""
+FED_LIST=false; FED_ADD=""; FED_REMOVE=""; FED_SYNC=""; FED_MODE=""; FED_TEST=""
+TOKEN=""; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false
 shift || true
+
+# mas — прозрачная прокладка к mas-cli, свои аргументы не разбираем
+if [ "$COMMAND" = "mas" ]; then
+    MAS_ARGS=("$@")
+    set --
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --service) SERVICE="$2"; shift 2 ;;
+        --service)   SERVICE="$2";        shift 2 ;;
+        --list)      FED_LIST=true;       shift ;;
+        --add)       FED_ADD="$2";        shift 2 ;;
+        --remove)    FED_REMOVE="$2";     shift 2 ;;
+        --sync-from) FED_SYNC="$2";       shift 2 ;;
+        --mode)      FED_MODE="$2";       shift 2 ;;
+        --test)      FED_TEST="$2";       shift 2 ;;
+        --token)     TOKEN="$2";          shift 2 ;;
+        --out)       OUT="$2";            shift 2 ;;
+        --issuer)    OIDC_ISSUER="$2";    shift 2 ;;
+        --client-id) OIDC_CLIENT_ID="$2"; shift 2 ;;
+        --name)      OIDC_NAME="$2";      shift 2 ;;
+        --disable)   OIDC_DISABLE=true;   shift ;;
+        --apply)     APPLY=true;          shift ;;
         --help|-h) usage; exit 0 ;;
         *) err "Неизвестный параметр: $1" ;;
     esac
@@ -124,7 +219,8 @@ case "$COMMAND" in
         echo ""
         warn "Перед обновлением рекомендуется сделать бэкап: ./manage.sh backup"
         echo ""
-        docker compose pull
+        # Synapse собирается локально — его образа в реестре нет, pull его пропускает
+        docker compose pull --ignore-buildable 2>/dev/null || docker compose pull || true
         # Версии образов запинены в start.sh: pull подтянет только пересобранные
         # теги. Смена версии — перезапуск start.sh новой ревизии.
         docker compose build --pull 2>/dev/null || true
@@ -193,6 +289,7 @@ case "$COMMAND" in
         echo "╠══════════════════════════════════════════════════════════╣"
         printf "║  Администратор:  @%-39s ║\n" "${ADMIN_USER}:${SERVER_NAME}"
         printf "║  Регистрация:    %-40s ║\n" "$REG_MODE"
+        printf "║  Аутентификация: %-40s ║\n" "$(mas_enabled && echo 'MAS' || echo 'встроенная в Synapse')"
         printf "║  Федерация:      %-40s ║\n" "$FED_MODE"
         printf "║  Бэкап:          %-40s ║\n" "$BACKUP_STATUS"
         echo "╠══════════════════════════════════════════════════════════╣"
@@ -229,6 +326,26 @@ case "$COMMAND" in
         else
             printf "║  %-20s %-35s ║\n" "Synapse API" "$(echo -e "${RED}не отвечает${NC}")"
             ALL_OK=false
+        fi
+
+        # Федерация — ключи сервера по адресу из well-known (или :8448)
+        _FT=$(curl -sf --max-time 5 "https://${DOMAIN}/.well-known/matrix/server" 2>/dev/null \
+            | grep -o '"m.server"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:[[:space:]]*"\(.*\)"/\1/' || true)
+        [ -z "$_FT" ] && _FT="${DOMAIN}:8448"
+        if curl -sf --max-time 5 "https://${_FT}/_matrix/key/v2/server" 2>/dev/null | grep -q '"server_name"'; then
+            printf "║  %-20s %-35s ║\n" "Федерация" "$(echo -e "${GREEN}отвечает (${_FT})${NC}")"
+        else
+            printf "║  %-20s %-35s ║\n" "Федерация" "$(echo -e "${YELLOW}не отвечает (${_FT})${NC}")"
+        fi
+
+        # MAS
+        if mas_enabled; then
+            if mas_cli doctor >/dev/null 2>&1; then
+                printf "║  %-20s %-35s ║\n" "MAS" "$(echo -e "${GREEN}отвечает${NC}")"
+            else
+                printf "║  %-20s %-35s ║\n" "MAS" "$(echo -e "${RED}doctor: ошибки${NC}")"
+                ALL_OK=false
+            fi
         fi
 
         # SSL сертификат
@@ -303,20 +420,30 @@ case "$COMMAND" in
         read -rp "$(echo -e "${BLUE}>>${NC} Выбор [1]: ")" _REG_CHOICE
         _REG_CHOICE="${_REG_CHOICE:-1}"
 
+        # С MAS переключатель живёт в его конфиге; enable_registration в Synapse
+        # остаётся false и служит только меткой для info/registration
+        _apply_registration() {
+            hs_set "enable_registration" "$1"
+            if mas_enabled; then
+                sed -i "s|^  password_registration_enabled: .*|  password_registration_enabled: $1|" ./config/mas/config.yaml
+                info "Перезапускаем MAS..."
+                docker compose restart mas >/dev/null
+            else
+                info "Перезапускаем Synapse..."
+                docker compose restart synapse >/dev/null
+            fi
+        }
+
         case "$_REG_CHOICE" in
             1)
-                hs_set "enable_registration" "false"
-                info "Перезапускаем Synapse..."
-                docker compose restart synapse
+                _apply_registration false
                 log "Регистрация закрыта"
                 ;;
             2)
                 warn "Любой сможет создать аккаунт на вашем сервере!"
                 read -rp "$(echo -e "${YELLOW}?${NC} Подтвердить? [y/N]: ")" _CONFIRM
                 if [[ "$_CONFIRM" =~ ^[Yy]$ ]]; then
-                    hs_set "enable_registration" "true"
-                    info "Перезапускаем Synapse..."
-                    docker compose restart synapse
+                    _apply_registration true
                     log "Регистрация открыта"
                 else
                     warn "Отменено"
@@ -331,84 +458,320 @@ case "$COMMAND" in
         [ ! -f "$HOMESERVER_YAML" ] && err "homeserver.yaml не найден"
         DOMAIN=$(grep "^SYNAPSE_DOMAIN=" .env | cut -d= -f2)
 
-        # Определяем текущий режим
-        CURRENT_MODE="open"
-        if grep -q "^federation_domain_whitelist:" "$HOMESERVER_YAML" 2>/dev/null; then
-            WHITELIST=$(grep -A 20 "^federation_domain_whitelist:" "$HOMESERVER_YAML" | grep "^  - " | awk '{print $2}')
-            if [ -z "$WHITELIST" ]; then
-                CURRENT_MODE="closed"
-            else
-                CURRENT_MODE="whitelist"
-            fi
+        # ── Неинтерактивные операции ──
+        if $FED_LIST; then
+            echo ""
+            case "$(fed_mode)" in
+                open)      log  "Федерация: ОТКРЫТАЯ — общение со всем Matrix-миром" ;;
+                closed)    warn "Федерация: ЗАКРЫТАЯ — изолированный контур" ;;
+                whitelist) log  "Федерация: WHITELIST — только разрешённые серверы:"
+                           fed_list | sed 's/^/    /' ;;
+            esac
+            echo ""
+            exit 0
         fi
 
+        if [ -n "$FED_ADD" ]; then
+            fed_valid_domain "$FED_ADD" || err "Некорректный домен: ${FED_ADD}"
+            mapfile -t _CUR < <(fed_list)
+            for d in "${_CUR[@]}"; do [ "$d" = "$FED_ADD" ] && { log "Уже в списке: ${FED_ADD}"; exit 0; }; done
+            [ "$(fed_mode)" = "open" ] && warn "Федерация была открытой — переключаю в режим whitelist"
+            fed_write "${_CUR[@]}" "$FED_ADD"
+            log "Добавлен: ${FED_ADD}"
+            fed_restart
+            exit 0
+        fi
+
+        if [ -n "$FED_REMOVE" ]; then
+            mapfile -t _CUR < <(fed_list)
+            _NEW=()
+            _FOUND=false
+            for d in "${_CUR[@]}"; do
+                [ "$d" = "$FED_REMOVE" ] && { _FOUND=true; continue; }
+                _NEW+=("$d")
+            done
+            $_FOUND || err "Нет в списке: ${FED_REMOVE}"
+            fed_write "${_NEW[@]}"
+            log "Удалён: ${FED_REMOVE}"
+            [ ${#_NEW[@]} -eq 0 ] && warn "Список пуст — федерация теперь ЗАКРЫТА"
+            fed_restart
+            exit 0
+        fi
+
+        if [ -n "$FED_SYNC" ]; then
+            # Формат ответа: JSON-массив строк, объект {"domains":[...]} или домены построчно.
+            # Откуда список — дело администратора; скрипт ничего не знает об источнике.
+            info "Загружаем список серверов: ${FED_SYNC}"
+            _BODY=$(curl -sfL --max-time 20 "$FED_SYNC") || err "Не удалось загрузить ${FED_SYNC}"
+            mapfile -t _NEW < <(printf '%s' "$_BODY" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+    if isinstance(data, dict):
+        data = data.get("domains") or data.get("servers") or []
+    items = [str(x) for x in data]
+except ValueError:
+    items = raw.split()
+for d in items:
+    d = d.strip().lower()
+    if d:
+        print(d)
+')
+            [ ${#_NEW[@]} -eq 0 ] && err "Список пуст или не разобран — whitelist не тронут"
+            for d in "${_NEW[@]}"; do fed_valid_domain "$d" || err "Некорректный домен в списке: ${d}"; done
+            mapfile -t _CUR < <(fed_list)
+            _ADDED=(); _REMOVED=()
+            for d in "${_NEW[@]}"; do printf '%s\n' "${_CUR[@]}" | grep -qx "$d" || _ADDED+=("$d"); done
+            for d in "${_CUR[@]}"; do printf '%s\n' "${_NEW[@]}" | grep -qx "$d" || _REMOVED+=("$d"); done
+            if [ ${#_ADDED[@]} -eq 0 ] && [ ${#_REMOVED[@]} -eq 0 ] && [ "$(fed_mode)" = "whitelist" ]; then
+                log "Список не изменился (${#_NEW[@]} серверов)"
+                exit 0
+            fi
+            fed_write "${_NEW[@]}"
+            [ ${#_ADDED[@]} -gt 0 ]   && log  "Добавлены: ${_ADDED[*]}"
+            [ ${#_REMOVED[@]} -gt 0 ] && warn "Убраны: ${_REMOVED[*]}"
+            fed_restart
+            exit 0
+        fi
+
+        if [ -n "$FED_MODE" ]; then
+            case "$FED_MODE" in
+                open)      fed_open; log "Федерация открыта" ;;
+                closed)    fed_write; log "Федерация закрыта — изолированный контур" ;;
+                whitelist) mapfile -t _CUR < <(fed_list); fed_write "${_CUR[@]}"
+                           log "Режим whitelist (${#_CUR[@]} серверов)" ;;
+                *) err "Режим: open | closed | whitelist" ;;
+            esac
+            fed_restart
+            exit 0
+        fi
+
+        if [ -n "$FED_TEST" ]; then
+            _T="$FED_TEST"
+            echo ""
+            info "Проверяем федерацию с ${_T}"
+
+            # 1. Нас пускают?
+            case "$(fed_mode)" in
+                open) log "Наш режим: открытая федерация" ;;
+                closed) warn "Наш режим: ЗАКРЫТАЯ федерация — ${_T} не сможет с нами общаться" ;;
+                whitelist)
+                    if fed_list | grep -qx "$_T"; then log "${_T} есть в нашем whitelist"
+                    else warn "${_T} НЕТ в нашем whitelist: ./manage.sh federation --add ${_T}"; fi ;;
+            esac
+
+            # 2. Делегация: куда на самом деле ходить
+            _WK=$(curl -sf --max-time 10 "https://${_T}/.well-known/matrix/server" 2>/dev/null || true)
+            _TARGET=$(printf '%s' "$_WK" | grep -o '"m.server"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:[[:space:]]*"\(.*\)"/\1/')
+            if [ -n "$_TARGET" ]; then
+                log "well-known: ${_T} → ${_TARGET}"
+            else
+                _TARGET="${_T}:8448"
+                warn "well-known не отдан, пробуем ${_TARGET}"
+            fi
+
+            # 3. Ключи сервера — базовый эндпоинт федерации
+            _KEYS=$(curl -sf --max-time 10 "https://${_TARGET}/_matrix/key/v2/server" 2>/dev/null || true)
+            if printf '%s' "$_KEYS" | grep -q '"server_name"'; then
+                _SN=$(printf '%s' "$_KEYS" | grep -o '"server_name"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
+                log "Федерационный API отвечает, server_name: ${_SN}"
+                [ "$_SN" != "$_T" ] && warn "server_name (${_SN}) не совпадает с доменом (${_T}) — проверьте делегацию у партнёра"
+            else
+                warn "https://${_TARGET}/_matrix/key/v2/server не отвечает: порт закрыт, TLS невалиден или сервер выключен"
+            fi
+
+            # 4. Видны ли мы снаружи — тот же тест в свою сторону
+            _SELF_NAME=$(grep "^SERVER_NAME=" .env | cut -d= -f2)
+            _SELF_WK=$(curl -sf --max-time 10 "https://${_SELF_NAME}/.well-known/matrix/server" 2>/dev/null || true)
+            _SELF_TARGET=$(printf '%s' "$_SELF_WK" | grep -o '"m.server"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:[[:space:]]*"\(.*\)"/\1/')
+            [ -z "$_SELF_TARGET" ] && _SELF_TARGET="${_SELF_NAME}:8448"
+            if curl -sf --max-time 10 "https://${_SELF_TARGET}/_matrix/key/v2/server" 2>/dev/null | grep -q '"server_name"'; then
+                log "Наш сервер виден снаружи: https://${_SELF_TARGET}"
+            else
+                warn "Наш сервер не отвечает по https://${_SELF_TARGET} — партнёр не сможет к нам достучаться"
+            fi
+
+            echo ""
+            info "Партнёру: добавить ${_SELF_NAME} в свой whitelist и прогнать такой же тест в свою сторону"
+            echo ""
+            exit 0
+        fi
+
+        # ── Интерактивное меню ──
+        CURRENT_MODE=$(fed_mode)
         echo ""
         case "$CURRENT_MODE" in
             open)      log  "Федерация сейчас: ОТКРЫТАЯ — общение со всем Matrix-миром" ;;
             closed)    warn "Федерация сейчас: ЗАКРЫТАЯ — изолированный контур" ;;
             whitelist) log  "Федерация сейчас: WHITELIST — только разрешённые серверы:"
-                       grep -A 20 "^federation_domain_whitelist:" "$HOMESERVER_YAML" | \
-                           grep "^  - " | awk '{print "    " $2}' ;;
+                       fed_list | sed 's/^/    /' ;;
         esac
 
         echo ""
-        echo "  [1] Открытая    — общение со всем Matrix-миром"
+        echo "  [1] Whitelist   — только указанные серверы (рекомендуется)"
         echo "  [2] Закрытая    — изолированный контур, нет общения с внешними серверами"
-        echo "  [3] Whitelist   — только указанные серверы"
+        echo "  [3] Открытая    — общение со всем Matrix-миром"
         echo "  [4] Отмена"
         echo ""
         read -rp "$(echo -e "${BLUE}>>${NC} Выбор: ")" _FED_CHOICE
 
         case "$_FED_CHOICE" in
             1)
-                hs_remove_block "federation_domain_whitelist"
-                hs_set "block_non_local_invites" "false"
-                hs_set "allow_public_rooms_over_federation" "true"
-                info "Перезапускаем Synapse..."
-                docker compose restart synapse
-                log "Федерация открыта"
-                ;;
-            2)
-                hs_remove_block "federation_domain_whitelist"
-                # Пустой whitelist = блокировать всех
-                printf "\nfederation_domain_whitelist: []\n" >> "$HOMESERVER_YAML"
-                hs_set "block_non_local_invites" "true"
-                hs_set "allow_public_rooms_over_federation" "false"
-                info "Перезапускаем Synapse..."
-                docker compose restart synapse
-                log "Федерация закрыта — изолированный контур"
-                ;;
-            3)
                 echo ""
                 echo "  Введите домены серверов через Enter. Пустая строка — завершить."
-                echo "  Пример: matrix.partner.ru"
+                echo "  Текущий список будет заменён. Добавить один сервер без меню:"
+                echo "    ./manage.sh federation --add matrix.partner.ru"
                 echo ""
                 SERVERS=()
                 while true; do
                     read -rp "$(echo -e "${BLUE}?${NC} Сервер (или Enter для завершения): ")" _SRV
                     [ -z "$_SRV" ] && break
+                    fed_valid_domain "$_SRV" || { warn "Некорректный домен: ${_SRV}"; continue; }
                     SERVERS+=("$_SRV")
                     log "Добавлен: ${_SRV}"
                 done
-
                 if [ ${#SERVERS[@]} -eq 0 ]; then
                     warn "Список пустой — отменено"
                 else
-                    hs_remove_block "federation_domain_whitelist"
-                    printf "\nfederation_domain_whitelist:\n" >> "$HOMESERVER_YAML"
-                    for srv in "${SERVERS[@]}"; do
-                        printf "  - %s\n" "$srv" >> "$HOMESERVER_YAML"
-                    done
-                    hs_set "block_non_local_invites" "true"
-                    hs_set "allow_public_rooms_over_federation" "false"
-                    info "Перезапускаем Synapse..."
-                    docker compose restart synapse
+                    fed_write "${SERVERS[@]}"
                     log "Whitelist настроен (${#SERVERS[@]} серверов)"
+                    fed_restart
                 fi
+                ;;
+            2)
+                fed_write
+                log "Федерация закрыта — изолированный контур"
+                fed_restart
+                ;;
+            3)
+                fed_open
+                log "Федерация открыта"
+                fed_restart
                 ;;
             *) warn "Отменено" ;;
         esac
         echo ""
+        ;;
+
+    verify-domain)
+        [ -z "$TOKEN" ] && err "Укажите токен: ./manage.sh verify-domain --token <TOKEN>"
+        DOMAIN=$(grep "^SYNAPSE_DOMAIN=" .env | cut -d= -f2)
+        mkdir -p ./config/nginx/well-known
+        printf '%s\n' "$TOKEN" > ./config/nginx/well-known/domain-verification
+        docker compose exec -T nginx nginx -s reload >/dev/null 2>&1 || true
+        log "Токен опубликован: https://${DOMAIN}/.well-known/domain-verification"
+        _GOT=$(curl -sf --max-time 10 "https://${DOMAIN}/.well-known/domain-verification" 2>/dev/null | tr -d '\r\n' || true)
+        if [ "$_GOT" = "$TOKEN" ]; then
+            log "Проверка: токен читается снаружи"
+        else
+            warn "Снаружи токен пока не читается — подождите несколько секунд и проверьте: curl https://${DOMAIN}/.well-known/domain-verification"
+        fi
+        info "Второй способ подтверждения, если сервис его предлагает, — TXT-запись в DNS домена ${DOMAIN}"
+        ;;
+
+    backup-key)
+        SERVER_NAME=$(grep "^SERVER_NAME=" .env | cut -d= -f2)
+        KEY="./config/synapse/${SERVER_NAME}.signing.key"
+        [ ! -f "$KEY" ] && err "Ключ не найден: ${KEY}"
+        OUT="${OUT:-${HOME}/${SERVER_NAME}.signing.key}"
+        mkdir -p "$(dirname "$OUT")"
+        cp "$KEY" "$OUT" && chmod 600 "$OUT"
+        log "Ключ подписи сохранён: ${OUT}"
+        warn "Унесите файл с этого сервера (менеджер паролей, офлайн-носитель)."
+        warn "Потеря ключа необратимо ломает федерацию — это единственный файл, который нельзя восстановить."
+        ;;
+
+    admin-token)
+        DOMAIN=$(grep "^SYNAPSE_DOMAIN=" .env | cut -d= -f2)
+        ADMIN_USER=$(grep "^INSTALL_ADMIN_USER=" .env | cut -d= -f2)
+        if mas_enabled; then
+            info "Выпускаем токен через MAS для ${ADMIN_USER}..."
+            _TOK=$(mas_cli manage issue-compatibility-token --yes-i-want-to-grant-synapse-admin-privileges "${ADMIN_USER}" 2>&1) \
+                || err "Не удалось выпустить токен: ${_TOK}"
+            echo ""
+            echo "$_TOK"
+            echo ""
+            info "Вставьте access token при входе в Synapse Admin UI"
+        else
+            read -rsp "$(echo -e "${BLUE}?${NC} Пароль ${ADMIN_USER}: ")" _PW; echo ""
+            _TOK=$(curl -sf -X POST "https://${DOMAIN}/_matrix/client/v3/login" \
+                -H "Content-Type: application/json" \
+                -d "{\"type\":\"m.login.password\",\"user\":\"${ADMIN_USER}\",\"password\":\"${_PW}\"}" \
+                2>/dev/null | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4 || true)
+            [ -z "$_TOK" ] && err "Вход не удался"
+            echo ""
+            echo "$_TOK"
+            echo ""
+        fi
+        ;;
+
+    oidc)
+        mas_enabled || err "Внешний вход требует MAS. Включите его: ./install.sh → режим «изменить настройки»"
+        DOMAIN=$(grep "^SYNAPSE_DOMAIN=" .env | cut -d= -f2)
+        SERVER_NAME=$(grep "^SERVER_NAME=" .env | cut -d= -f2)
+        DB_PASS=$(grep "^POSTGRES_PASSWORD=" .env | cut -d= -f2)
+        MAS_SECRET=$(grep "^MAS_SECRET=" .env | cut -d= -f2)
+        _REG="false"; [ "$(hs_get enable_registration)" = "true" ] && _REG="true"
+
+        if $OIDC_DISABLE; then
+            OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""
+        else
+            [ -z "$OIDC_ISSUER" ] || [ -z "$OIDC_CLIENT_ID" ] && \
+                err "Нужны оба параметра: ./manage.sh oidc --issuer https://... --client-id <ID> [--name Название]"
+            [ -z "$OIDC_NAME" ] && OIDC_NAME=$(grep "^INSTALL_OIDC_NAME=" .env | cut -d= -f2)
+        fi
+
+        python3 lib/mas-config.py ./config/mas/config.yaml \
+            --public-base "https://${DOMAIN}/" \
+            --db-uri "postgresql://synapse:${DB_PASS}@postgres:5432/mas" \
+            --server-name "${SERVER_NAME}" \
+            --mas-secret "${MAS_SECRET}" \
+            --password-registration "${_REG}" \
+            --oidc-issuer "${OIDC_ISSUER}" \
+            --oidc-client-id "${OIDC_CLIENT_ID}" \
+            --oidc-name "${OIDC_NAME:-SSO}" || err "Не удалось обновить конфиг MAS"
+
+        sed -i "s|^INSTALL_OIDC_ISSUER=.*|INSTALL_OIDC_ISSUER=${OIDC_ISSUER}|" .env
+        sed -i "s|^INSTALL_OIDC_CLIENT_ID=.*|INSTALL_OIDC_CLIENT_ID=${OIDC_CLIENT_ID}|" .env
+        sed -i "s|^INSTALL_OIDC_NAME=.*|INSTALL_OIDC_NAME=${OIDC_NAME}|" .env
+        docker compose restart mas >/dev/null
+        if $OIDC_DISABLE; then
+            log "Внешний вход отключён"
+        else
+            log "Внешний вход включён: ${OIDC_ISSUER}"
+            info "redirect_uri выше — его нужно зарегистрировать у провайдера"
+        fi
+        ;;
+
+    mas)
+        mas_enabled || err "MAS не включён"
+        [ ${#MAS_ARGS[@]} -eq 0 ] && { mas_cli manage --help; exit 0; }
+        mas_cli manage "${MAS_ARGS[@]}"
+        ;;
+
+    mas-migrate)
+        mas_enabled || err "MAS не включён. Сначала включите его через install.sh, затем запустите перенос."
+        echo ""
+        info "syn2mas переносит аккаунты, пароли и устройства из Synapse в MAS."
+        info "Проверка (check) безопасна. Перенос (--apply) требует остановленного Synapse."
+        echo ""
+        if $APPLY; then
+            warn "Сделайте бэкап перед переносом: ./manage.sh backup"
+            read -rp "$(echo -e "${YELLOW}?${NC} Остановить Synapse и выполнить перенос? [y/N]: ")" _C
+            [[ "$_C" =~ ^[Yy]$ ]] || err "Отменено"
+            docker compose stop synapse >/dev/null
+            docker compose run --rm -v "$(pwd)/config/synapse:/synapse:ro" mas \
+                syn2mas -c /config/config.yaml --synapse-config /synapse/homeserver.yaml migrate \
+                && log "Перенос выполнен" || warn "Перенос завершился с ошибкой — смотрите вывод выше"
+            docker compose start synapse >/dev/null
+            log "Synapse запущен"
+        else
+            docker compose run --rm -v "$(pwd)/config/synapse:/synapse:ro" mas \
+                syn2mas -c /config/config.yaml --synapse-config /synapse/homeserver.yaml check \
+                && log "Проверка пройдена — можно запускать с --apply" \
+                || warn "Проверка нашла проблемы — исправьте их до переноса"
+        fi
         ;;
 
     password-reset)
@@ -434,6 +797,15 @@ case "$COMMAND" in
         fi
         if [ ${#_NEW_PASS} -lt 8 ]; then
             err "Пароль слишком короткий (минимум 8 символов)"
+        fi
+
+        if mas_enabled; then
+            info "Меняем пароль через MAS..."
+            mas_cli manage set-password --ignore-complexity "${_TARGET_USER}" "${_NEW_PASS}" >/dev/null && \
+                log "Пароль @${_TARGET_USER}:${SERVER_NAME} изменён" || \
+                err "MAS не принял пароль: ./manage.sh logs --service mas"
+            echo ""
+            exit 0
         fi
 
         info "Генерируем хэш пароля..."
@@ -571,6 +943,7 @@ case "$COMMAND" in
         rm -f ./config/synapse/homeserver.yaml ./config/synapse/Dockerfile
         rm -f ./config/synapse/*.signing.key 2>/dev/null || true
         rm -rf ./config/element ./config/cinny ./config/coturn ./config/livekit
+        rm -rf ./config/mas ./config/nginx/well-known
 
         # Крон бэкапов создаётся в /etc/cron.d/matrix-backup, удаляем при наличии прав.
         rm -f /etc/cron.d/matrix-backup 2>/dev/null || true

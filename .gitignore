@@ -4,6 +4,8 @@ config/synapse/homeserver.yaml
 config/synapse/*.signing.key
 config/coturn/turnserver.conf
 config/livekit/livekit.yaml
+config/mas/config.yaml
+config/nginx/well-known/
 
 # Генерируемые файлы
 docker-compose.yml

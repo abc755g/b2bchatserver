@@ -31,6 +31,12 @@ usage() {
     echo "  --fluffychat-port Порт FluffyChat            (по умолчанию: случайный)"
     echo "  --calls          Включить звонки (Coturn + LiveKit)"
     echo "  --open-registration  Открытая регистрация пользователей"
+    echo "  --mas            Включить matrix-authentication-service (MAS)"
+    echo ""
+    echo "Вход через внешнего OIDC-провайдера (требует --mas):"
+    echo "  --oidc-issuer    Issuer провайдера          (https://id.company.ru)"
+    echo "  --oidc-client-id Client ID, выданный провайдером"
+    echo "  --oidc-name      Название кнопки входа      (по умолчанию: SSO)"
     echo "  --max-upload     Макс. размер файла          (по умолчанию: 500M)"
     echo ""
     echo "SMTP:"
@@ -112,6 +118,11 @@ BACKUP_SCHEDULE="1"
 REINSTALL=false
 ENV_FILE=""
 ALLOW_DIRECT_RUN=false
+USE_MAS=false
+MAS_SECRET=""
+OIDC_ISSUER=""
+OIDC_CLIENT_ID=""
+OIDC_NAME=""
 
 # ── Версии образов (пины) ─────────────────────────────────
 # Обновлять только вместе: сверьтесь с upgrade notes соответствующего проекта.
@@ -127,8 +138,12 @@ IMG_CERTBOT="certbot/certbot:v5.7.0"
 IMG_COTURN="coturn/coturn:4.17.2-alpine"
 IMG_LIVEKIT="livekit/livekit-server:v1.13.6"
 IMG_LK_JWT="ghcr.io/element-hq/lk-jwt-service:0.6.0"
+IMG_MAS="ghcr.io/element-hq/matrix-authentication-service:1.23.0"
 # Пакет S3-провайдера медиа (ставится в образ Synapse при --minio)
 PKG_S3_PROVIDER="synapse-s3-storage-provider==1.7.0"
+# Модуль политик: колбэки Synapse (приглашения, вход в комнаты, поиск людей) во внешний
+# HTTP-сервис. Ставится в образ всегда, включается только блоком modules: в homeserver.yaml
+PKG_HTTP_ANTISPAM="synapse-http-antispam==0.5.1"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -148,6 +163,10 @@ while [[ $# -gt 0 ]]; do
         --calls)            USE_CALLS=true;        shift ;;
         --minio)            USE_MINIO=true;        shift ;;
         --open-registration) OPEN_REGISTRATION=true; shift ;;
+        --mas)              USE_MAS=true;          shift ;;
+        --oidc-issuer)      OIDC_ISSUER="$2";      shift 2 ;;
+        --oidc-client-id)   OIDC_CLIENT_ID="$2";   shift 2 ;;
+        --oidc-name)        OIDC_NAME="$2";        shift 2 ;;
         --max-upload)       MAX_UPLOAD="$2";       shift 2 ;;
         --federation-mode)    FEDERATION_MODE="$2";    shift 2 ;;
         --federation-servers) FEDERATION_SERVERS="$2"; shift 2 ;;
@@ -182,7 +201,7 @@ if [ -n "$ENV_FILE" ]; then
         [ -z "$key" ] && continue
         [[ "$key" =~ ^# ]] && continue
         case "$key" in
-            ADMIN_PASS|DB_PASS|MINIO_PASS|SMTP_PASS|S3_ACCESS_KEY|S3_SECRET_KEY|TURN_SECRET|LIVEKIT_KEY|LIVEKIT_SECRET)
+            ADMIN_PASS|DB_PASS|MINIO_PASS|SMTP_PASS|S3_ACCESS_KEY|S3_SECRET_KEY|TURN_SECRET|LIVEKIT_KEY|LIVEKIT_SECRET|MAS_SECRET)
                 [ -z "${!key:-}" ] && printf -v "$key" '%s' "$value"
                 ;;
         esac
@@ -366,6 +385,13 @@ else
     REG_SECRET=$(openssl rand -hex 32)
 fi
 
+# MAS_SECRET связывает Synapse и MAS: смена на работающей установке разлогинит всех
+if [ "$INSTALL_MODE" = "modify" ] && [ -f ".env" ]; then
+    _EXISTING_MAS=$(grep "^MAS_SECRET=" .env | cut -d= -f2)
+    [ -n "$_EXISTING_MAS" ] && MAS_SECRET="$_EXISTING_MAS"
+fi
+[ -z "$MAS_SECRET" ] && MAS_SECRET=$(openssl rand -hex 32)
+
 if $USE_CALLS; then
     [ -z "$TURN_SECRET" ]    && TURN_SECRET=$(openssl rand -hex 32)
     [ -z "$LIVEKIT_KEY" ]    && LIVEKIT_KEY=$(openssl rand -hex 8)
@@ -498,9 +524,34 @@ if $USE_CALLS; then
 fi
 
 # ── Функция генерации homeserver.yaml ─────────────────────
+# Фрагмент homeserver.yaml про федерацию. Отдельной функцией: case внутри $( )
+# в heredoc ломает старые bash, а так его можно и протестировать отдельно.
+federation_yaml() {
+    case "${FEDERATION_MODE}" in
+        closed)
+            echo "federation_domain_whitelist: []"
+            echo "allow_public_rooms_over_federation: false"
+            ;;
+        whitelist)
+            echo "allow_public_rooms_over_federation: false"
+            if [ -n "${FEDERATION_SERVERS}" ]; then
+                echo "federation_domain_whitelist:"
+                echo "${FEDERATION_SERVERS}" | tr ',' '\n' | while IFS= read -r _srv; do
+                    [ -n "$_srv" ] && echo "  - ${_srv}"
+                done
+            else
+                echo "federation_domain_whitelist: []"
+            fi
+            ;;
+    esac
+    return 0
+}
+
 generate_homeserver_yaml() {
     local ENABLE_REG="false"
     $OPEN_REGISTRATION && ENABLE_REG="true"
+    # С MAS аккаунтами заведует он: регистрация и пароли на стороне Synapse выключаются
+    $USE_MAS && ENABLE_REG="false"
 
     cat > ./config/synapse/homeserver.yaml << YAML
 server_name: "${SERVER_NAME}"
@@ -539,18 +590,20 @@ turn_allow_guests: false
 TURN
 fi)
 
-$(if $USE_CALLS; then cat << RTC
-experimental_features:
-  msc3266_enabled: true
-  msc4222_enabled: true
-  msc4143_enabled: true
+$(
+_EXP=""
+$USE_CALLS && _EXP="${_EXP}  msc3266_enabled: true\n  msc4222_enabled: true\n  msc4143_enabled: true\n"
+$USE_MAS   && _EXP="${_EXP}  msc4108_enabled: true\n"
+[ -n "$_EXP" ] && printf "experimental_features:\n%b" "$_EXP"
+if $USE_CALLS; then cat << RTC
 
 matrix_rtc:
   transports:
     - type: livekit
       livekit_service_url: "https://${DOMAIN}/livekit-jwt"
 RTC
-fi)
+fi
+)
 
 log_config: /data/log.config
 signing_key_path: /data/${SERVER_NAME}.signing.key
@@ -559,25 +612,18 @@ enable_registration: ${ENABLE_REG}
 registration_shared_secret: "${REG_SECRET}"
 enable_registration_captcha: false
 
-$(case "${FEDERATION_MODE}" in
-    closed)
-        echo "federation_domain_whitelist: []"
-        echo "block_non_local_invites: true"
-        echo "allow_public_rooms_over_federation: false"
-        ;;
-    whitelist)
-        echo "block_non_local_invites: true"
-        echo "allow_public_rooms_over_federation: false"
-        if [ -n "${FEDERATION_SERVERS}" ]; then
-            echo "federation_domain_whitelist:"
-            echo "${FEDERATION_SERVERS}" | tr ',' '\n' | while IFS= read -r _srv; do
-                [ -n "$_srv" ] && echo "  - ${_srv}"
-            done
-        else
-            echo "federation_domain_whitelist: []"
-        fi
-        ;;
-esac)
+$(if $USE_MAS; then cat << MAS
+password_config:
+  enabled: false
+
+matrix_authentication_service:
+  enabled: true
+  endpoint: http://mas:8080/
+  secret: "${MAS_SECRET}"
+MAS
+fi)
+
+$(federation_yaml)
 
 report_stats: false
 suppress_key_server_warning: true
@@ -618,13 +664,16 @@ fi)
 YAML
 }
 
-# Генерируем Dockerfile для Synapse если нужен S3-провайдер
-if $USE_MINIO; then
-    cat > ./config/synapse/Dockerfile << DOCKERFILE
+# Dockerfile для Synapse: модуль политик всегда, S3-провайдер — при --minio.
+# Оба пакета инертны без своих блоков в homeserver.yaml.
+_SYNAPSE_PKGS="${PKG_HTTP_ANTISPAM}"
+$USE_MINIO && _SYNAPSE_PKGS="${_SYNAPSE_PKGS} ${PKG_S3_PROVIDER}"
+cat > ./config/synapse/Dockerfile << DOCKERFILE
 FROM ${IMG_SYNAPSE}
-RUN pip install ${PKG_S3_PROVIDER} --quiet
+USER root
+RUN pip install --no-cache-dir --quiet ${_SYNAPSE_PKGS}
+USER 991
 DOCKERFILE
-fi
 
 # ── Генерируем конфиги ────────────────────────────────────
 info "Генерируем конфигурацию..."
@@ -637,6 +686,7 @@ POSTGRES_USER=synapse
 POSTGRES_PASSWORD=${DB_PASS}
 POSTGRES_DB=synapse
 REGISTRATION_SHARED_SECRET=${REG_SECRET}
+MAS_SECRET=${MAS_SECRET}
 MINIO_ROOT_USER=minioadmin
 MINIO_ROOT_PASSWORD=${MINIO_PASS}
 $(if $USE_CALLS; then
@@ -674,10 +724,38 @@ INSTALL_BACKUP_MEDIA=${BACKUP_MEDIA}
 INSTALL_BACKUP_SCHEDULE=${BACKUP_SCHEDULE}
 INSTALL_FEDERATION_MODE=${FEDERATION_MODE}
 INSTALL_FEDERATION_SERVERS=${FEDERATION_SERVERS}
+INSTALL_USE_MAS=${USE_MAS}
+INSTALL_OIDC_ISSUER=${OIDC_ISSUER}
+INSTALL_OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+INSTALL_OIDC_NAME=${OIDC_NAME}
 ENV
 
 # homeserver.yaml
 generate_homeserver_yaml
+
+# Конфиг MAS
+if $USE_MAS; then
+    mkdir -p ./config/mas
+    if [ ! -f ./config/mas/config.yaml ]; then
+        info "Генерируем базовый конфиг MAS..."
+        docker run --rm ${IMG_MAS} config generate > ./config/mas/config.yaml 2>/dev/null || \
+            err "Не удалось сгенерировать конфиг MAS"
+    fi
+    _MAS_REG="false"
+    $OPEN_REGISTRATION && _MAS_REG="true"
+    python3 lib/mas-config.py ./config/mas/config.yaml \
+        --public-base "https://${DOMAIN}/" \
+        --db-uri "postgresql://synapse:${DB_PASS}@postgres:5432/mas" \
+        --server-name "${SERVER_NAME}" \
+        --mas-secret "${MAS_SECRET}" \
+        --password-registration "${_MAS_REG}" \
+        --oidc-issuer "${OIDC_ISSUER}" \
+        --oidc-client-id "${OIDC_CLIENT_ID}" \
+        --oidc-name "${OIDC_NAME:-SSO}" || err "Не удалось настроить MAS"
+    # MAS в контейнере работает не от root — файл должен читаться
+    chmod 755 ./config/mas && chmod 644 ./config/mas/config.yaml
+    log "Конфиг MAS готов"
+fi
 
 # Конфиг Element
 if $USE_ELEMENT; then
@@ -784,12 +862,12 @@ services:
 
 COMPOSE
 
-if $USE_MINIO; then
-    cat >> ./docker-compose.yml << COMPOSE
+cat >> ./docker-compose.yml << COMPOSE
   synapse:
     build:
       context: ./config/synapse
       dockerfile: Dockerfile
+    image: b2b-chat-synapse:${IMG_SYNAPSE##*:}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -809,27 +887,27 @@ if $USE_MINIO; then
       start_period: 30s
 
 COMPOSE
-else
+
+# MAS — сервис аутентификации: свой контейнер, своя БД, тот же Postgres
+if $USE_MAS; then
     cat >> ./docker-compose.yml << COMPOSE
-  synapse:
-    image: ${IMG_SYNAPSE}
+  mas:
+    image: ${IMG_MAS}
     restart: unless-stopped
+    command: ["server", "--config=/config/config.yaml"]
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
     volumes:
-      - ./config/synapse:/data
-      - synapse_media:/data/media_store
+      - ./config/mas/config.yaml:/config/config.yaml:ro
     networks:
       - matrix_net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8008/health || exit 1"]
-      interval: 15s
-      timeout: 5s
+      test: ["CMD", "mas-cli", "-c", "/config/config.yaml", "doctor"]
+      interval: 30s
+      timeout: 15s
       retries: 5
-      start_period: 30s
+      start_period: 45s
 
 COMPOSE
 fi
@@ -921,6 +999,7 @@ cat >> ./docker-compose.yml << COMPOSE
     ports:
       - "80:80"
       - "${PORT}:443"
+      - "8448:8448"
       - "${ADMIN_PORT}:${ADMIN_PORT}"
 COMPOSE
 
@@ -931,6 +1010,7 @@ $USE_FLUFFYCHAT && echo "      - \"${FLUFFYCHAT_PORT}:${FLUFFYCHAT_PORT}\"" >> .
 cat >> ./docker-compose.yml << COMPOSE
     volumes:
       - ./config/nginx/matrix.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./config/nginx/well-known:/var/www/wellknown/.well-known:ro
       - certbot_certs:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
     networks:
@@ -1000,6 +1080,15 @@ else
     WELL_KNOWN_CLIENT_JSON="{\"m.homeserver\":{\"base_url\":\"https://${DOMAIN}\"}}"
 fi
 
+mkdir -p ./config/nginx/well-known/matrix
+echo "{\"m.server\":\"${DOMAIN}:${PORT}\"}" > ./config/nginx/well-known/matrix/server
+if $USE_MAS; then
+    echo "${WELL_KNOWN_CLIENT_JSON%\}}, \"org.matrix.msc2965.authentication\": {\"issuer\": \"https://${DOMAIN}/\", \"account\": \"https://${DOMAIN}/account/\"}}" \
+        > ./config/nginx/well-known/matrix/client
+else
+    echo "${WELL_KNOWN_CLIENT_JSON}" > ./config/nginx/well-known/matrix/client
+fi
+
 cat > ./config/nginx/matrix.conf << NGINX
 # ── HTTP → HTTPS ──────────────────────────────────────────
 server {
@@ -1042,6 +1131,28 @@ if $USE_ELEMENT; then
 NGINX
 fi
 
+if $USE_MAS; then
+    cat >> ./config/nginx/matrix.conf << NGINX
+    # Логин, логаут и refresh забирает MAS, остальной Client-Server API — Synapse
+    location ~ ^/_matrix/client/(.*)/(login|logout|refresh) {
+        proxy_pass http://mas:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location ~ ^/(upstream/|account/|authorize|oauth2/|login|logout|register|consent|device|recovery|complete-compat-sso|link|reauth|assets/|\.well-known/openid-configuration) {
+        proxy_pass http://mas:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+NGINX
+fi
+
 cat >> ./config/nginx/matrix.conf << NGINX
     location /_matrix {
         proxy_pass http://synapse:8008;
@@ -1059,18 +1170,12 @@ cat >> ./config/nginx/matrix.conf << NGINX
         proxy_set_header X-Forwarded-Proto https;
     }
 
-    location /.well-known/matrix/server {
-        default_type application/json;
-        add_header Access-Control-Allow-Origin *;
-        return 200 '{"m.server":"${DOMAIN}:${PORT}"}';
-    }
-
-    location /.well-known/matrix/client {
+    location /.well-known/ {
+        root /var/www/wellknown;
         default_type application/json;
         add_header Access-Control-Allow-Origin *;
         add_header Access-Control-Allow-Methods 'GET, OPTIONS';
         add_header Access-Control-Allow-Headers 'Origin, X-Requested-With, Content-Type, Accept, Authorization';
-        return 200 '${WELL_KNOWN_CLIENT_JSON}';
     }
 
     location /health {
@@ -1194,6 +1299,29 @@ server {
 }
 NGINX
 
+cat >> ./config/nginx/matrix.conf << NGINX
+# ── Федерация :8448 ───────────────────────────────────────
+server {
+    listen 8448 ssl http2;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    client_max_body_size ${MAX_UPLOAD};
+
+    location / {
+        proxy_pass http://synapse:8008;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+NGINX
+
 log "Конфигурация сгенерирована"
 
 # ── Signing key ───────────────────────────────────────────
@@ -1220,6 +1348,17 @@ for i in $(seq 1 30); do
         { log "PostgreSQL готов"; break; } || sleep 1
     [ $i -eq 30 ] && err "PostgreSQL не поднялся"
 done
+
+if $USE_MAS; then
+    if docker compose exec -T postgres psql -U synapse -d postgres -tAc \
+        "SELECT 1 FROM pg_database WHERE datname='mas'" 2>/dev/null | grep -q 1; then
+        log "База MAS уже есть"
+    else
+        docker compose exec -T postgres psql -U synapse -d postgres -c \
+            "CREATE DATABASE mas OWNER synapse ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;" \
+            &>/dev/null && log "База MAS создана" || err "Не удалось создать базу MAS"
+    fi
+fi
 
 # ── SSL сертификат ────────────────────────────────────────
 STACK=$(basename $(pwd))
@@ -1259,8 +1398,8 @@ fi
 
 # ── Запуск стека ──────────────────────────────────────────
 info "Запускаем все сервисы..."
-# --build: в режиме S3 Synapse собирается локально, и смена пина в Dockerfile
-# без пересборки не подхватится
+# --build: Synapse собирается локально (модуль политик, S3-провайдер), и смена
+# пина в Dockerfile без пересборки не подхватится
 docker compose up -d --build
 
 info "Ждём Synapse (до 60 сек)..."
@@ -1283,15 +1422,41 @@ if $USE_MINIO; then
         [ $i -eq 30 ] && { warn "MinIO не ответил"; break; }
     done
 
+    # Анонимный доступ к бакету не выдаём: Synapse ходит с ключами,
+    # а публичное скачивание раздало бы все вложения по прямой ссылке
     docker compose exec -T minio sh -c \
         "mc alias set local http://localhost:9000 minioadmin ${MINIO_PASS} 2>/dev/null && \
          mc mb local/matrix-media 2>/dev/null || true && \
-         mc anonymous set download local/matrix-media 2>/dev/null || true" && \
+         mc anonymous set none local/matrix-media 2>/dev/null || true" && \
         log "MinIO bucket готов" || warn "MinIO bucket — настройте вручную"
 fi
 
 # ── Создание / обновление admin пользователя ─────────────
-if [ "$INSTALL_MODE" = "install" ] || [ "$INSTALL_MODE" = "reinstall" ]; then
+if $USE_MAS; then
+    info "Ждём MAS (до 90 сек)..."
+    for i in $(seq 1 45); do
+        docker compose exec -T mas mas-cli -c /config/config.yaml doctor &>/dev/null && \
+            { log "MAS готов"; break; } || sleep 2
+        [ $i -eq 45 ] && warn "MAS не ответил — проверьте ./manage.sh logs --service mas"
+    done
+fi
+
+if $USE_MAS && [ -n "$ADMIN_PASS" ]; then
+    if [ "$INSTALL_MODE" = "modify" ]; then
+        info "Обновляем пароль ${ADMIN_USER} в MAS..."
+        docker compose exec -T mas mas-cli -c /config/config.yaml \
+            manage set-password "${ADMIN_USER}" "${ADMIN_PASS}" &>/dev/null && \
+            log "Пароль администратора обновлён" || \
+            warn "Не удалось обновить пароль: ./manage.sh logs --service mas"
+    else
+        info "Создаём пользователя ${ADMIN_USER} в MAS..."
+        _MAS_REG_OUT=$(docker compose exec -T mas mas-cli -c /config/config.yaml \
+            manage register-user --yes --ignore-password-complexity \
+            --password "${ADMIN_PASS}" --admin "${ADMIN_USER}" 2>&1) && \
+            log "Пользователь @${ADMIN_USER}:${SERVER_NAME} создан" || \
+            warn "Не удалось создать пользователя: ${_MAS_REG_OUT}"
+    fi
+elif [ "$INSTALL_MODE" = "install" ] || [ "$INSTALL_MODE" = "reinstall" ]; then
     if [ -n "$ADMIN_PASS" ]; then
         info "Создаём пользователя ${ADMIN_USER}..."
         _REG_OUTPUT=$(docker compose exec -T synapse \
@@ -1308,7 +1473,7 @@ if [ "$INSTALL_MODE" = "install" ] || [ "$INSTALL_MODE" = "reinstall" ]; then
             warn "Войдите в Synapse Admin UI и создайте администратора вручную"
         fi
     fi
-elif [ "$INSTALL_MODE" = "modify" ] && [ -n "$ADMIN_PASS" ]; then
+elif [ "$INSTALL_MODE" = "modify" ] && [ -n "$ADMIN_PASS" ] && ! $USE_MAS; then
     info "Обновляем пароль ${ADMIN_USER}..."
     _NEW_HASH=$(docker compose exec -T synapse hash_password -c /data/homeserver.yaml -p "$ADMIN_PASS" 2>&1 | tr -d '\r\n')
     if [ -n "$_NEW_HASH" ] && echo "$_NEW_HASH" | grep -q '^\$2'; then
@@ -1324,7 +1489,7 @@ fi
 ADMIN_TOKEN=$(curl -sf -X POST https://${DOMAIN}/_matrix/client/v3/login \
     -H "Content-Type: application/json" \
     -d "{\"type\":\"m.login.password\",\"user\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}" \
-    2>/dev/null | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+    2>/dev/null | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4) || ADMIN_TOKEN=""
 
 # ── Бэкапы ────────────────────────────────────────────────
 if $BACKUP_ENABLED; then
@@ -1544,3 +1709,29 @@ echo "╠═══════════════════════�
 echo "║  Управление: ./manage.sh --help                          ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
+
+# ── Ключ подписи ──────────────────────────────────────────
+warn "Сохраните ключ подписи сервера в надёжное место — сейчас, до первых пользователей."
+echo "     ./manage.sh backup-key --out ~/matrix-signing-key"
+echo "     Потеря ключа необратимо ломает федерацию: другие серверы перестанут"
+echo "     доверять вашему, и починить это можно только сменой домена."
+echo ""
+
+if $USE_MAS; then
+    echo "MAS включён: вход и регистрация идут через него, а не через Synapse."
+    echo "  Пароль администратора:  ./manage.sh mas set-password ${ADMIN_USER}"
+    echo "  Токен для Admin UI:     ./manage.sh admin-token"
+    if [ -n "$OIDC_ISSUER" ]; then
+        echo "  Вход через провайдера:  ${OIDC_ISSUER}"
+    else
+        echo "  Подключить внешний вход: ./manage.sh oidc --issuer <URL> --client-id <ID>"
+    fi
+    echo ""
+fi
+
+if [ "$FEDERATION_MODE" = "whitelist" ]; then
+    echo "Федерация в режиме whitelist. Добавить сервер партнёра:"
+    echo "  ./manage.sh federation --add chat.partner.ru"
+    echo "  ./manage.sh federation --test chat.partner.ru"
+    echo ""
+fi

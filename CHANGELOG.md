@@ -1,5 +1,51 @@
 # Changelog
 
+## [v1.2.0] — не выпущено
+
+Тема релиза: федерация с партнёрскими серверами и подключение к внешним сервисам.
+
+### Добавлено
+- **MAS** (matrix-authentication-service `1.23.0`) в стек: опция `--mas`, для новых
+  установок включена по умолчанию. База MAS создаётся в том же Postgres, конфиг
+  генерирует сам MAS и правит `lib/mas-config.py`. С MAS работают Element X и
+  вход через внешних OIDC-провайдеров; регистрация и пароли на стороне Synapse
+  при этом выключаются.
+- `manage.sh federation` без меню: `--list`, `--add`, `--remove`, `--mode`,
+  `--sync-from <url>` (JSON-массив, `{"domains":[...]}` или построчно) и
+  `--test <domain>` — проверка well-known, ключей сервера и собственной видимости.
+- `manage.sh verify-domain --token` — публикует токен подтверждения владения
+  доменом по `/.well-known/domain-verification`. Для этого well-known отдаётся
+  файлами из `config/nginx/well-known/`, а не `return 200` в конфиге nginx.
+- `manage.sh backup-key` — выгрузка ключа подписи отдельно от общего бэкапа;
+  `start.sh` напоминает об этом сразу после установки.
+- `manage.sh oidc --issuer --client-id [--name]` / `--disable` — внешний
+  OIDC-провайдер для MAS; `manage.sh mas <...>` — прокладка к `mas-cli manage`;
+  `manage.sh mas-migrate [--apply]` — `syn2mas` для существующих аккаунтов;
+  `manage.sh admin-token` — токен для Admin UI (через MAS или паролем).
+- Листенер федерации на `:8448` в nginx и compose — порт был открыт в ufw,
+  но ничего на нём не слушало; работала только делегация через well-known.
+- `.well-known/matrix/client` с MAS содержит `org.matrix.msc2965.authentication`,
+  без этого Element X не находит, куда логиниться.
+- Образ Synapse собирается всегда и включает `synapse-http-antispam==0.5.1` —
+  модуль, который отдаёт решения о приглашениях, входе в комнаты и видимости в
+  поиске внешнему HTTP-сервису. Без блока `modules:` в `homeserver.yaml` он
+  ничего не делает; как включить — в `docs/external-integration.md`.
+- `health` показывает федерацию и MAS, `info` — режим аутентификации.
+- Документация: `docs/federation.md`, `docs/external-integration.md`.
+
+### Изменено
+- `manage.sh registration` и `password-reset` с MAS работают через него, а не
+  через `homeserver.yaml` и `users.password_hash`.
+- Бакет MinIO больше не получает анонимный доступ на скачивание: Synapse ходит с
+  ключами, публичная политика раздавала бы вложения по прямой ссылке.
+- Неудачный вход администратора на последнем шаге установки не роняет `start.sh`.
+- `install.sh` ставит `python3`, если его нет.
+
+### Исправлено
+- В `homeserver.yaml` писалась опция `block_non_local_invites`, которой в Synapse
+  нет: он молча игнорировал её, а администратор считал, что внешние приглашения
+  заблокированы. Строка убрана; ограничение федерации обеспечивает whitelist.
+
 ## [v1.1.0] — 27.08.2026
 
 ### Изменено

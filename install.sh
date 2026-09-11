@@ -180,6 +180,13 @@ if ! command -v awk >/dev/null 2>&1; then
     apt-get install -y gawk >/dev/null 2>&1 || warn "Не удалось установить gawk, продолжаем установку"
 fi
 
+# Конфиги MAS и список федерации правятся python3 (в Ubuntu он есть, но не всегда в minimal-образах)
+if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 не найден — устанавливаем..."
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y python3 >/dev/null 2>&1 || err "Не удалось установить python3 — он нужен для настройки сервера"
+fi
+
 RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
 RAM_GB=$(awk "BEGIN {printf \"%.1f\", ${RAM_MB}/1024}")
 if   [ "$RAM_MB" -ge 3800 ]; then log "RAM: ${RAM_GB} GB — OK"
@@ -585,6 +592,41 @@ else
     done
 fi
 
+# ── Блок 8a: Аутентификация (MAS) ────────────────────────
+if $ADVANCED_SETUP; then
+    title "Блок 8a — Аутентификация"
+fi
+echo ""
+
+# MAS — сервис аутентификации Matrix. Нужен для мобильного Element X и для входа
+# через внешних OIDC-провайдеров. Для новых установок включён по умолчанию.
+_MAS_PREV=$(prev_bool INSTALL_USE_MAS "$([ "$MODIFY_MODE" = "true" ] && echo false || echo true)")
+USE_MAS=false
+if $ADVANCED_SETUP; then
+    info "MAS (matrix-authentication-service) — современный вход: Element X, SSO через"
+    info "внешних провайдеров, управление сессиями. Без него работает только классический"
+    info "вход по паролю, а Element X не подключится."
+    if ask_yn "Включить MAS?" "$_MAS_PREV"; then
+        USE_MAS=true
+        log "Аутентификация: MAS"
+    else
+        log "Аутентификация: встроенная в Synapse (без Element X и SSO)"
+    fi
+else
+    [ "$_MAS_PREV" = "y" ] && USE_MAS=true
+    $USE_MAS && log "Аутентификация: MAS (рекомендуемый режим)" \
+             || log "Аутентификация: встроенная в Synapse (как было настроено ранее)"
+fi
+
+if [ "$MODIFY_MODE" = "true" ] && $USE_MAS && [ "$(prev_bool INSTALL_USE_MAS 'false')" = "n" ]; then
+    echo ""
+    warn "Вы включаете MAS на уже работающем сервере."
+    warn "Существующие аккаунты нужно перенести, иначе пользователи не смогут войти:"
+    warn "  после установки выполните  ./manage.sh mas-migrate   (проверка),"
+    warn "  затем                      ./manage.sh mas-migrate --apply"
+    echo ""
+fi
+
 # ── Блок 9: Регистрация пользователей ────────────────────
 if $ADVANCED_SETUP; then
     title "Блок 9 — Регистрация пользователей"
@@ -816,6 +858,7 @@ printf "║  Пример логина:    %-39s ║\n" "@user:${SERVER_NAME}"
 printf "║  Email SSL:       %-39s ║\n" "$EMAIL"
 echo "╠══════════════════════════════════════════════════════════╣"
 printf "║  Администратор:   %-39s ║\n" "$ADMIN_USER"
+printf "║  Аутентификация:  %-39s ║\n" "$($USE_MAS && echo 'MAS' || echo 'встроенная в Synapse')"
 if $OPEN_REGISTRATION; then
     printf "║  Регистрация:     %-39s ║\n" "открытая"
 else
@@ -948,6 +991,14 @@ fi
 
 $USE_CALLS         && PARAMS="${PARAMS} --calls"
 $OPEN_REGISTRATION && PARAMS="${PARAMS} --open-registration"
+$USE_MAS           && PARAMS="${PARAMS} --mas"
+_OIDC_ISSUER=$(prev_val INSTALL_OIDC_ISSUER "")
+_OIDC_CLIENT_ID=$(prev_val INSTALL_OIDC_CLIENT_ID "")
+_OIDC_NAME=$(prev_val INSTALL_OIDC_NAME "")
+if $USE_MAS && [ -n "$_OIDC_ISSUER" ] && [ -n "$_OIDC_CLIENT_ID" ]; then
+    PARAMS="${PARAMS} --oidc-issuer ${_OIDC_ISSUER} --oidc-client-id ${_OIDC_CLIENT_ID}"
+    [ -n "$_OIDC_NAME" ] && PARAMS="${PARAMS} --oidc-name ${_OIDC_NAME}"
+fi
 PARAMS="${PARAMS} --federation-mode ${FEDERATION_MODE}"
 [ -n "$FEDERATION_SERVERS" ] && PARAMS="${PARAMS} --federation-servers ${FEDERATION_SERVERS}"
 
