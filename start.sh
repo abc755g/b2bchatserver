@@ -1733,5 +1733,9 @@ if [ "$FEDERATION_MODE" = "whitelist" ]; then
     echo "Федерация в режиме whitelist. Добавить сервер партнёра:"
     echo "  ./manage.sh federation --add chat.partner.ru"
     echo "  ./manage.sh federation --test chat.partner.ru"
+    if ! printf '%s' ",${FEDERATION_SERVERS}," | grep -q ",chat.b2b-links.ru,"; then
+        echo "Подключение к B2B-порталу (b2b-links.ru) начинается с его сервера:"
+        echo "  ./manage.sh federation --add chat.b2b-links.ru"
+    fi
     echo ""
 fi

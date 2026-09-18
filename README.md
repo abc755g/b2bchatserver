@@ -126,7 +126,7 @@ curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/ins
 ./manage.sh backup             # Запустить бэкап прямо сейчас
 ./manage.sh registration       # Включить/выключить регистрацию
 ./manage.sh federation         # Управление федерацией (см. ниже)
-./manage.sh verify-domain --token T   # Опубликовать токен подтверждения домена
+./manage.sh verify-domain --token T [--path NAME]   # Опубликовать токен подтверждения домена
 ./manage.sh backup-key         # Сохранить ключ подписи сервера
 ./manage.sh admin-token        # Токен администратора для Admin UI
 ./manage.sh oidc ...           # Вход через внешнего OIDC-провайдера (нужен MAS)

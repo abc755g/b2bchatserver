@@ -13,9 +13,11 @@
 - `manage.sh federation` без меню: `--list`, `--add`, `--remove`, `--mode`,
   `--sync-from <url>` (JSON-массив, `{"domains":[...]}` или построчно) и
   `--test <domain>` — проверка well-known, ключей сервера и собственной видимости.
-- `manage.sh verify-domain --token` — публикует токен подтверждения владения
-  доменом по `/.well-known/domain-verification`. Для этого well-known отдаётся
-  файлами из `config/nginx/well-known/`, а не `return 200` в конфиге nginx.
+- `manage.sh verify-domain --token [--path NAME]` — публикует токен подтверждения
+  владения доменом по `/.well-known/NAME`. По умолчанию `b2b-matrix-verify` — путь,
+  который проверяет B2B-портал; другому сервису имя задаётся через `--path`. Для
+  этого well-known отдаётся файлами из `config/nginx/well-known/`, а не `return 200`
+  в конфиге nginx.
 - `manage.sh backup-key` — выгрузка ключа подписи отдельно от общего бэкапа;
   `start.sh` напоминает об этом сразу после установки.
 - `manage.sh oidc --issuer --client-id [--name]` / `--disable` — внешний
@@ -30,7 +32,15 @@
   модуль, который отдаёт решения о приглашениях, входе в комнаты и видимости в
   поиске внешнему HTTP-сервису. Без блока `modules:` в `homeserver.yaml` он
   ничего не делает; как включить — в `docs/external-integration.md`.
-- `health` показывает федерацию и MAS, `info` — режим аутентификации.
+- Блок «Федерация» в `install.sh` отдельно предлагает сервер B2B-портала
+  `chat.b2b-links.ru` (по умолчанию «да»; при перенастройке — как было раньше).
+  Инсталлятор знает адреса портала, но ничего не подключает без согласия.
+- Политика регистрации OAuth-клиентов MAS задаётся явно в `config.yaml`
+  (`policy.data.client_registration`): только https и совпадение хоста
+  `redirect_uri` с `client_uri`, контакт необязателен. Так внешние сервисы и
+  Element X регистрируются сами, а обновление MAS не меняет правила молча.
+- `health` показывает федерацию, MAS и готовность OAuth-входа для внешних
+  сервисов (`auth_metadata` и регистрация клиентов), `info` — режим аутентификации.
 - Документация: `docs/federation.md`, `docs/external-integration.md`.
 
 ### Изменено

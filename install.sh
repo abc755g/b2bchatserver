@@ -41,6 +41,9 @@ ask_yn() {
 # ── Хелпер: читаем значение из существующего .env ─────────
 INSTALL_DIR="/opt/b2b-chat"
 IGNORE_PREV_CONFIG=false
+# Matrix-сервер B2B-портала (b2b-links.ru). Инсталлятор о нём знает, но в конфиг
+# он попадает только с согласия пользователя — см. блок «Федерация».
+PORTAL_MATRIX_SERVER="chat.b2b-links.ru"
 
 prev_val() {
     local key="$1" default="${2:-}"
@@ -690,14 +693,29 @@ case "$_FED_CHOICE" in
     *)
         FEDERATION_MODE="whitelist"
         echo ""
-        info "Введите домены серверов, с которыми разрешено общение."
+        _PREV_SERVERS=$(prev_val INSTALL_FEDERATION_SERVERS "")
+
+        # Сервер B2B-портала — отдельным вопросом: без него не работают общие
+        # комнаты с порталом и подтверждение сотрудников кодом от бота.
+        # По умолчанию «да», если сервер ставится впервые или он уже был в списке.
+        _PORTAL_DEFAULT="y"
+        [ -n "$_PREV_SERVERS" ] && ! printf '%s' ",${_PREV_SERVERS}," | grep -q ",${PORTAL_MATRIX_SERVER}," && _PORTAL_DEFAULT="n"
+        info "B2B-портал (b2b-links.ru) держит свой Matrix-сервер ${PORTAL_MATRIX_SERVER}:"
+        info "через него идут общие комнаты с порталом и подтверждение сотрудников."
+        if ask_yn "Разрешить федерацию с ${PORTAL_MATRIX_SERVER}?" "$_PORTAL_DEFAULT"; then
+            FEDERATION_SERVERS="${PORTAL_MATRIX_SERVER}"
+            log "Добавлен: ${PORTAL_MATRIX_SERVER}"
+        fi
+        echo ""
+
+        info "Введите домены других серверов, с которыми разрешено общение."
         info "Пустая строка — завершить. Можно оставить пустым и добавить позже."
         echo ""
-        _PREV_SERVERS=$(prev_val INSTALL_FEDERATION_SERVERS "")
         [ -n "$_PREV_SERVERS" ] && info "Текущие серверы: ${_PREV_SERVERS//,/, }" && echo ""
         while true; do
             read -rp "$(echo -e "${BLUE}?${NC} Сервер (или Enter для завершения): ")" _SRV </dev/tty
             [ -z "$_SRV" ] && break
+            printf '%s' ",${FEDERATION_SERVERS}," | grep -q ",${_SRV}," && { warn "Уже в списке: ${_SRV}"; continue; }
             FEDERATION_SERVERS="${FEDERATION_SERVERS:+${FEDERATION_SERVERS},}${_SRV}"
             log "Добавлен: ${_SRV}"
         done

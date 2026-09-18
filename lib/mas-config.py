@@ -65,6 +65,20 @@ def main() -> int:
         "  endpoint: http://synapse:8008/\n"
     ))
 
+    # Регистрация OAuth-клиентов (внешние сервисы, Element Web/X) — по спецификации
+    # Matrix она динамическая: клиент сам присылает свои метаданные. Дефолты MAS
+    # это разрешают, но задаём явно, чтобы обновление MAS не поменяло их молча:
+    # только https, redirect_uri на том же хосте, что client_uri; контакт
+    # необязателен — многие клиенты его не шлют.
+    text = replace_block(text, "policy", (
+        "policy:\n"
+        "  data:\n"
+        "    client_registration:\n"
+        "      allow_insecure_uris: false\n"
+        "      allow_host_mismatch: false\n"
+        "      allow_missing_contacts: true\n"
+    ))
+
     # Локальные пароли остаются: без них у администратора сервера нет входа,
     # если внешний провайдер недоступен. Саморегистрацию открывает отдельный флаг.
     # Правим только строку enabled — schemes и minimum_complexity ставит сам MAS.

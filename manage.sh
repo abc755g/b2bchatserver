@@ -120,7 +120,9 @@ usage() {
     echo "    --sync-from URL           Загрузить список серверов по URL"
     echo "    --mode open|closed|whitelist  Сменить режим"
     echo "    --test DOMAIN             Проверить связность с сервером"
-    echo "  verify-domain --token T   Опубликовать токен подтверждения домена"
+    echo "  verify-domain --token T [--path NAME]"
+    echo "                            Опубликовать токен подтверждения домена по"
+    echo "                            /.well-known/NAME (по умолчанию b2b-matrix-verify — путь B2B-портала)"
     echo "  backup-key [--out PATH]   Сохранить ключ подписи сервера"
     echo "  admin-token               Выдать токен администратора для Admin UI"
     echo "  oidc --issuer URL --client-id ID [--name NAME]"
@@ -140,7 +142,7 @@ usage() {
 COMMAND="${1:-}"
 SERVICE=""
 FED_LIST=false; FED_ADD=""; FED_REMOVE=""; FED_SYNC=""; FED_MODE=""; FED_TEST=""
-TOKEN=""; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false
+TOKEN=""; WK_PATH="b2b-matrix-verify"; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false
 shift || true
 
 # mas — прозрачная прокладка к mas-cli, свои аргументы не разбираем
@@ -159,6 +161,7 @@ while [[ $# -gt 0 ]]; do
         --mode)      FED_MODE="$2";       shift 2 ;;
         --test)      FED_TEST="$2";       shift 2 ;;
         --token)     TOKEN="$2";          shift 2 ;;
+        --path)      WK_PATH="$2";        shift 2 ;;
         --out)       OUT="$2";            shift 2 ;;
         --issuer)    OIDC_ISSUER="$2";    shift 2 ;;
         --client-id) OIDC_CLIENT_ID="$2"; shift 2 ;;
@@ -345,6 +348,20 @@ case "$COMMAND" in
             else
                 printf "║  %-20s %-35s ║\n" "MAS" "$(echo -e "${RED}doctor: ошибки${NC}")"
                 ALL_OK=false
+            fi
+            # Вход внешних сервисов и Element X: клиент находит MAS через
+            # auth_metadata и регистрируется сам на /oauth2/registration
+            _AM=$(curl -sf --max-time 5 "https://${DOMAIN}/_matrix/client/v1/auth_metadata" 2>/dev/null || true)
+            _REG=$(printf '%s' "$_AM" | grep -o '"registration_endpoint"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:[[:space:]]*"\(.*\)"/\1/' || true)
+            if [ -z "$_AM" ]; then
+                printf "║  %-20s %-35s ║\n" "OAuth для клиентов" "$(echo -e "${RED}auth_metadata не отдаётся${NC}")"
+                ALL_OK=false
+            elif [ -z "$_REG" ]; then
+                printf "║  %-20s %-35s ║\n" "OAuth для клиентов" "$(echo -e "${YELLOW}регистрация клиентов выключена${NC}")"
+            elif [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'Content-Type: application/json' -d '{}' "$_REG" 2>/dev/null)" = "400" ]; then
+                printf "║  %-20s %-35s ║\n" "OAuth для клиентов" "$(echo -e "${GREEN}готов${NC}")"
+            else
+                printf "║  %-20s %-35s ║\n" "OAuth для клиентов" "$(echo -e "${YELLOW}регистрация не отвечает${NC}")"
             fi
         fi
 
@@ -655,17 +672,22 @@ for d in items:
         ;;
 
     verify-domain)
-        [ -z "$TOKEN" ] && err "Укажите токен: ./manage.sh verify-domain --token <TOKEN>"
+        [ -z "$TOKEN" ] && err "Укажите токен: ./manage.sh verify-domain --token <TOKEN> [--path <имя-файла>]"
+        # Имя файла под /.well-known/ выдаёт сервис, к которому подключаемся;
+        # один сегмент без слэшей, иначе можно было бы записать мимо каталога.
+        [[ "$WK_PATH" =~ ^[A-Za-z0-9._-]+$ ]] || err "Некорректное имя файла: ${WK_PATH} (допустимы буквы, цифры, . _ -)"
+        [[ "$WK_PATH" = "matrix" || "$WK_PATH" = "openid-configuration" ]] && err "Имя ${WK_PATH} занято самим Matrix"
         DOMAIN=$(grep "^SYNAPSE_DOMAIN=" .env | cut -d= -f2)
+        _URL="https://${DOMAIN}/.well-known/${WK_PATH}"
         mkdir -p ./config/nginx/well-known
-        printf '%s\n' "$TOKEN" > ./config/nginx/well-known/domain-verification
+        printf '%s\n' "$TOKEN" > "./config/nginx/well-known/${WK_PATH}"
         docker compose exec -T nginx nginx -s reload >/dev/null 2>&1 || true
-        log "Токен опубликован: https://${DOMAIN}/.well-known/domain-verification"
-        _GOT=$(curl -sf --max-time 10 "https://${DOMAIN}/.well-known/domain-verification" 2>/dev/null | tr -d '\r\n' || true)
+        log "Токен опубликован: ${_URL}"
+        _GOT=$(curl -sf --max-time 10 "$_URL" 2>/dev/null | tr -d '\r\n' || true)
         if [ "$_GOT" = "$TOKEN" ]; then
             log "Проверка: токен читается снаружи"
         else
-            warn "Снаружи токен пока не читается — подождите несколько секунд и проверьте: curl https://${DOMAIN}/.well-known/domain-verification"
+            warn "Снаружи токен пока не читается — подождите несколько секунд и проверьте: curl ${_URL}"
         fi
         info "Второй способ подтверждения, если сервис его предлагает, — TXT-запись в DNS домена ${DOMAIN}"
         ;;
