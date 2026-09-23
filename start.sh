@@ -24,6 +24,9 @@ usage() {
     echo "  --client         Клиент (можно несколько раз) (element|cinny|fluffychat)"
     echo "                   по умолчанию = element"
     echo "  --port           Порт HTTPS основного домена (по умолчанию: 443)"
+    echo "  --bind-ip        Публиковать порты только на этом IP"
+    echo "                   (по умолчанию на всех интерфейсах; нужен, когда"
+    echo "                    80/443 на хосте уже заняты другим сервисом)"
     echo "  --minio          Включить MinIO для S3-медиа"
     echo "  --minio-port     Порт MinIO Console          (по умолчанию: случайный)"
     echo "  --admin-port     Порт Synapse Admin          (по умолчанию: случайный)"
@@ -86,6 +89,7 @@ ADMIN_USER=""
 ADMIN_PASS=""
 CLIENTS=""
 PORT="443"
+BIND_IP=""
 MINIO_PORT=""
 ADMIN_PORT=""
 CINNY_PORT=""
@@ -154,6 +158,7 @@ while [[ $# -gt 0 ]]; do
         --admin-pass)       err "Передача секретов через CLI запрещена. Используйте --env-file (ADMIN_PASS)." ;;
         --client)           CLIENTS="${CLIENTS},$2"; shift 2 ;;
         --port)             PORT="$2";             shift 2 ;;
+        --bind-ip)          BIND_IP="$2";          shift 2 ;;
         --minio-port)       MINIO_PORT="$2";       shift 2 ;;
         --admin-port)       ADMIN_PORT="$2";       shift 2 ;;
         --cinny-port)       CINNY_PORT="$2";       shift 2 ;;
@@ -306,6 +311,31 @@ is_valid_port "$PORT" || err "Некорректный порт Element/Synapse:
 [ -n "$ADMIN_PORT" ]      && is_valid_port "$ADMIN_PORT"      || [ -z "$ADMIN_PORT" ]      || err "Некорректный порт Admin UI: ${ADMIN_PORT}"
 [ -n "$CINNY_PORT" ]      && is_valid_port "$CINNY_PORT"      || [ -z "$CINNY_PORT" ]      || err "Некорректный порт Cinny: ${CINNY_PORT}"
 [ -n "$FLUFFYCHAT_PORT" ] && is_valid_port "$FLUFFYCHAT_PORT" || [ -z "$FLUFFYCHAT_PORT" ] || err "Некорректный порт FluffyChat: ${FLUFFYCHAT_PORT}"
+
+# ── Привязка публикуемых портов к одному IP ───────────────
+# Без --bind-ip Docker публикует порты на всех интерфейсах. Если 80 или 443 на
+# хосте уже заняты (например, рядом живёт другой сайт), контейнер nginx не
+# стартует с "port is already allocated". Привязка к отдельному адресу решает
+# это без правки compose-файла руками.
+#
+# Coturn это не затрагивает: он работает с network_mode: host и слушает на всех
+# адресах независимо от флага.
+BIND_PREFIX=""
+if [ -n "$BIND_IP" ]; then
+    if [[ "$BIND_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        BIND_PREFIX="${BIND_IP}:"
+    elif [[ "$BIND_IP" == *:* ]]; then
+        # IPv6 в compose требует скобок: "[::1]:80:80"
+        BIND_PREFIX="[${BIND_IP}]:"
+    else
+        err "Некорректный --bind-ip: ${BIND_IP} (ожидается IPv4 или IPv6)"
+    fi
+    if ! ip -o addr show 2>/dev/null | grep -qw -- "${BIND_IP}"; then
+        warn "Адрес ${BIND_IP} не найден на интерфейсах сервера."
+        warn "Docker не сможет занять на нём порты — проверьте настройку сети."
+    fi
+fi
+
 
 # Сначала проверяем пользовательские порты на дубли, затем генерируем отсутствующие.
 # 80 зарезервирован под HTTP-челленджи, 443 занят основным HTTPS server-блоком nginx,
@@ -466,9 +496,16 @@ fi
 
 # ── Проверка DNS ──────────────────────────────────────────
 info "Проверяем DNS..."
-SERVER_IP=$(curl -sf --max-time 5 https://api.ipify.org || \
-            curl -sf --max-time 5 https://ifconfig.me || \
-            hostname -I | awk '{print $1}')
+if [ -n "$BIND_IP" ]; then
+    # Порты слушают только на этом адресе, значит и A-запись должна вести сюда.
+    # Определять адрес по исходящему трафику нельзя: наружу сервер может ходить
+    # с другого интерфейса, и проверка ложно ругалась бы на верный DNS.
+    SERVER_IP="$BIND_IP"
+else
+    SERVER_IP=$(curl -sf --max-time 5 https://api.ipify.org || \
+                curl -sf --max-time 5 https://ifconfig.me || \
+                hostname -I | awk '{print $1}')
+fi
 
 DNS_OK=true
 check_dns() {
@@ -722,6 +759,7 @@ INSTALL_S3_BUCKET=${S3_BUCKET}
 INSTALL_S3_DAYS=${S3_DAYS}
 INSTALL_BACKUP_MEDIA=${BACKUP_MEDIA}
 INSTALL_BACKUP_SCHEDULE=${BACKUP_SCHEDULE}
+INSTALL_BIND_IP=${BIND_IP}
 INSTALL_FEDERATION_MODE=${FEDERATION_MODE}
 INSTALL_FEDERATION_SERVERS=${FEDERATION_SERVERS}
 INSTALL_USE_MAS=${USE_MAS}
@@ -997,15 +1035,15 @@ cat >> ./docker-compose.yml << COMPOSE
     image: ${IMG_NGINX}
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "${PORT}:443"
-      - "8448:8448"
-      - "${ADMIN_PORT}:${ADMIN_PORT}"
+      - "${BIND_PREFIX}80:80"
+      - "${BIND_PREFIX}${PORT}:443"
+      - "${BIND_PREFIX}8448:8448"
+      - "${BIND_PREFIX}${ADMIN_PORT}:${ADMIN_PORT}"
 COMPOSE
 
-$USE_MINIO      && echo "      - \"${MINIO_PORT}:${MINIO_PORT}\"" >> ./docker-compose.yml
-$USE_CINNY      && echo "      - \"${CINNY_PORT}:${CINNY_PORT}\"" >> ./docker-compose.yml
-$USE_FLUFFYCHAT && echo "      - \"${FLUFFYCHAT_PORT}:${FLUFFYCHAT_PORT}\"" >> ./docker-compose.yml
+$USE_MINIO      && echo "      - \"${BIND_PREFIX}${MINIO_PORT}:${MINIO_PORT}\"" >> ./docker-compose.yml
+$USE_CINNY      && echo "      - \"${BIND_PREFIX}${CINNY_PORT}:${CINNY_PORT}\"" >> ./docker-compose.yml
+$USE_FLUFFYCHAT && echo "      - \"${BIND_PREFIX}${FLUFFYCHAT_PORT}:${FLUFFYCHAT_PORT}\"" >> ./docker-compose.yml
 
 cat >> ./docker-compose.yml << COMPOSE
     volumes:
@@ -1036,9 +1074,9 @@ if $USE_CALLS; then
     volumes:
       - ./config/livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro
     ports:
-      - "7880:7880"
-      - "7881:7881"
-      - "50000-50010:50000-50010/udp"
+      - "${BIND_PREFIX}7880:7880"
+      - "${BIND_PREFIX}7881:7881"
+      - "${BIND_PREFIX}50000-50010:50000-50010/udp"
     networks:
       - matrix_net
 

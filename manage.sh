@@ -7,7 +7,7 @@ info()  { echo -e "${BLUE}[..]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!!]${NC} $*"; }
 err()   { echo -e "${RED}[ERR]${NC} $*"; exit 1; }
 
-INSTALL_DIR="/opt/b2b-chat"
+INSTALL_DIR="/srv/b2b-chat"
 
 # ── Проверка установки ────────────────────────────────────
 [ ! -f "${INSTALL_DIR}/.env" ] && err "B2B-чат не установлен. Запустите install.sh"

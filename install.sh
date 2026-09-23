@@ -39,7 +39,7 @@ ask_yn() {
 }
 
 # ── Хелпер: читаем значение из существующего .env ─────────
-INSTALL_DIR="/opt/b2b-chat"
+INSTALL_DIR="/srv/b2b-chat"
 IGNORE_PREV_CONFIG=false
 # Matrix-сервер B2B-портала (b2b-links.ru). Инсталлятор о нём знает, но в конфиг
 # он попадает только с согласия пользователя — см. блок «Федерация».
@@ -440,6 +440,33 @@ if $ADVANCED_SETUP; then
             FLUFFYCHAT_PORT=$(ask "Укажите порт FluffyChat" "${FLUFFYCHAT_PORT:-случайный}")
             [ "${FLUFFYCHAT_PORT}" = "случайный" ] && FLUFFYCHAT_PORT=""
         fi
+    fi
+fi
+
+# Привязка портов к одному IP. Спрашиваем не всегда: только в расширенной
+# настройке, либо когда это действительно нужно — у сервера несколько адресов
+# или 80-й порт уже занят другим сервисом на всех интерфейсах.
+BIND_IP=$(prev_val INSTALL_BIND_IP "")
+_GLOBAL_IPS=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')
+_IP_COUNT=$(echo $_GLOBAL_IPS | wc -w)
+_PORT80_BUSY=false
+if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\[::\]|\*):80$'; then
+    _PORT80_BUSY=true
+fi
+
+if $ADVANCED_SETUP || [ "$_IP_COUNT" -gt 1 ] || $_PORT80_BUSY; then
+    echo ""
+    if $_PORT80_BUSY; then
+        warn "Порт 80 занят другим сервисом на всех интерфейсах."
+        warn "Без привязки к отдельному IP контейнер nginx не запустится."
+    fi
+    [ "$_IP_COUNT" -gt 1 ] && echo "  Адреса сервера: ${_GLOBAL_IPS}"
+    _BIND_DEFAULT="n"
+    { [ -n "$BIND_IP" ] || $_PORT80_BUSY; } && _BIND_DEFAULT="y"
+    if ask_yn "Публиковать порты чата только на одном IP?" "$_BIND_DEFAULT"; then
+        BIND_IP=$(ask "Укажите IP для публикации портов" "${BIND_IP:-${_GLOBAL_IPS%% *}}")
+    else
+        BIND_IP=""
     fi
 fi
 
@@ -994,6 +1021,7 @@ chmod +x start.sh manage.sh
 PARAMS="--domain ${DOMAIN} --server-name ${SERVER_NAME} --email ${EMAIL}"
 PARAMS="${PARAMS} --admin-user ${ADMIN_USER}"
 PARAMS="${PARAMS} --port ${PORT}"
+[ -n "$BIND_IP" ]        && PARAMS="${PARAMS} --bind-ip ${BIND_IP}"
 $USE_MINIO               && PARAMS="${PARAMS} --minio"
 $USE_MINIO && [ -n "$MINIO_PORT" ] && PARAMS="${PARAMS} --minio-port ${MINIO_PORT}"
 [ -n "$ADMIN_PORT" ]      && PARAMS="${PARAMS} --admin-port ${ADMIN_PORT}"
