@@ -1487,12 +1487,14 @@ if $USE_MAS; then
 fi
 
 if $USE_MAS && [ -n "$ADMIN_PASS" ]; then
-    if [ "$INSTALL_MODE" = "modify" ]; then
-        info "Обновляем пароль ${ADMIN_USER} в MAS..."
-        docker compose exec -T mas mas-cli -c /config/config.yaml \
-            manage set-password "${ADMIN_USER}" "${ADMIN_PASS}" &>/dev/null && \
-            log "Пароль администратора обновлён" || \
-            warn "Не удалось обновить пароль: ./manage.sh logs --service mas"
+    # Существование пользователя проверяем делом, а не режимом установки.
+    # INSTALL_MODE становится "modify" как только есть .env — а он остаётся и
+    # после прерванной установки, когда аккаунта ещё нет. В таком случае скрипт
+    # шёл в ветку смены пароля, она тихо падала на несуществующем пользователе,
+    # и установка заканчивалась без администратора.
+    if docker compose exec -T mas mas-cli -c /config/config.yaml \
+        manage set-password --ignore-complexity "${ADMIN_USER}" "${ADMIN_PASS}" &>/dev/null; then
+        log "Пароль администратора @${ADMIN_USER}:${SERVER_NAME} обновлён"
     else
         info "Создаём пользователя ${ADMIN_USER} в MAS..."
         _MAS_REG_OUT=$(docker compose exec -T mas mas-cli -c /config/config.yaml \
