@@ -60,6 +60,17 @@ prev_val() {
     fi
 }
 
+# Запоминаем выбранный режим и клиента сразу, не дожидаясь конца установки:
+# при падении в середине повторный запуск иначе снова предлагал бы «рекомендуемые»,
+# хотя повтор — это как раз тот случай, когда выбор важно не потерять.
+# Значения дописываются в .env, который start.sh пересоздаёт при каждом запуске.
+persist_install_prefs() {
+    [ -f "${INSTALL_DIR}/.env" ] || return 0
+    sed -i '/^INSTALL_ADVANCED_SETUP=/d; /^INSTALL_USE_B2B=/d' "${INSTALL_DIR}/.env"
+    echo "INSTALL_ADVANCED_SETUP=${ADVANCED_SETUP}" >> "${INSTALL_DIR}/.env"
+    echo "INSTALL_USE_B2B=${USE_B2B:-false}" >> "${INSTALL_DIR}/.env"
+}
+
 # true/false → y/n для ask_yn
 prev_bool() {
     local val
@@ -125,6 +136,7 @@ if [ "$INSTALL_MODE_CHOICE" = "2" ]; then
 else
     log "Режим: установка с рекомендуемыми параметрами"
 fi
+persist_install_prefs
 
 # ── Требования к серверу (только при первой установке/переустановке) ──
 if [ "$MODIFY_MODE" = "false" ]; then
@@ -1154,12 +1166,45 @@ INSTALL_FROM_INSTALL_SH=true bash start.sh $PARAMS --env-file "$SECRETS_FILE"
 rm -f "$SECRETS_FILE"
 trap - EXIT
 
-# start.sh каждый раз пересоздаёт .env, поэтому режим дописываем после него.
-if [ -f "${INSTALL_DIR}/.env" ]; then
-    sed -i '/^INSTALL_ADVANCED_SETUP=/d; /^INSTALL_USE_B2B=/d' "${INSTALL_DIR}/.env"
-    echo "INSTALL_ADVANCED_SETUP=${ADVANCED_SETUP}" >> "${INSTALL_DIR}/.env"
-    # USE_B2B живёт только в install.sh, start.sh про него не знает и в .env не пишет.
-    echo "INSTALL_USE_B2B=${USE_B2B}" >> "${INSTALL_DIR}/.env"
+# start.sh пересоздал .env — восстанавливаем то, чего он не знает.
+persist_install_prefs
+
+# ── Ключ подписи ──────────────────────────────────────────
+# Предлагаем сохранить сразу: это единственный файл установки, который нельзя
+# восстановить, а откладывают такие вещи обычно навсегда. На повторных прогонах
+# не спрашиваем — ключ тот же, его уже предлагали сохранить при установке.
+if [ "$MODIFY_MODE" != "true" ]; then
+    title "Ключ подписи сервера"
+    echo ""
+    echo "  Этим ключом ваш сервер подписывает всё, что отправляет другим серверам"
+    echo "  Matrix. По нему они узнают, что сообщение действительно от вас."
+    echo ""
+    echo "  Ключ создаётся один раз и не восстанавливается ничем — ни бэкапом базы,"
+    echo "  ни переустановкой. Если потерять и сервер, и копию ключа, другие серверы"
+    echo "  перестанут доверять вашему домену, и починить это можно только сменой"
+    echo "  домена: все адреса пользователей вида @ivan:${SERVER_NAME} станут недействительны."
+    echo ""
+    echo "  Поэтому копию стоит держать отдельно от сервера — в менеджере паролей"
+    echo "  или на офлайн-носителе."
+    echo ""
+
+    if ask_yn "Сохранить ключ подписи в отдельный файл сейчас?" "y"; then
+        _KEY_OUT=$(ask "Куда сохранить на сервере" "/root/${SERVER_NAME}.signing.key")
+        if ./manage.sh backup-key --out "$_KEY_OUT" >/dev/null 2>&1; then
+            log "Ключ сохранён: ${_KEY_OUT}"
+            echo ""
+            echo "  Теперь заберите его на свою машину и удалите копию с сервера:"
+            echo ""
+            echo "    scp root@${EXTERNAL_IP}:${_KEY_OUT} ~/${SERVER_NAME}.signing.key"
+            echo "    ssh root@${EXTERNAL_IP} 'shred -u ${_KEY_OUT}'"
+            echo ""
+        else
+            warn "Не удалось сохранить ключ. Сделайте вручную: ./manage.sh backup-key --out ПУТЬ"
+        fi
+    else
+        warn "Ключ не сохранён. Не откладывайте надолго:"
+        echo "     ./manage.sh backup-key --out ~/${SERVER_NAME}.signing.key"
+    fi
 fi
 
 # ── Шпаргалка по управлению ───────────────────────────────

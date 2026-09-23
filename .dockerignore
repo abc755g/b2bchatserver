@@ -1,0 +1,19 @@
+# Секреты не должны попадать в контекст сборки: всё, что сюда не занесено,
+# Docker отправляет демону и может запечь в слой образа.
+secrets/
+*.signing.key
+.env
+config/synapse/homeserver.yaml
+config/synapse/*.signing.key
+config/coturn/turnserver.conf
+config/livekit/livekit.yaml
+config/mas/config.yaml
+
+# Данные и мусор
+data/
+backups/
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+*.log
