@@ -28,6 +28,9 @@ jobs:
           test -f manage.sh
           test -f config/synapse/log.config
           test -f config/nginx/matrix-http.conf
+          # lib/mas-config.py зовут start.sh и manage.sh при включённом MAS.
+          # Без него установка падает на настройке MAS — так было в v1.2.0 и v1.3.0.
+          test -f lib/mas-config.py
           bash -n install.sh
           bash -n start.sh
           bash -n manage.sh
@@ -43,7 +46,7 @@ jobs:
 
           # Архив сохраняет структуру директорий
           tar czf release-assets/b2b-chat.tar.gz \
-            start.sh manage.sh config/
+            start.sh manage.sh config/ lib/
 
           (
             cd release-assets

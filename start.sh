@@ -136,7 +136,9 @@ IMG_ELEMENT="vectorim/element-web:v1.12.26"
 IMG_CINNY="ajbura/cinny:v4.12.6"
 IMG_FLUFFYCHAT="ghcr.io/krille-chan/fluffychat:v2.9.1"
 IMG_SYNAPSE_ADMIN="awesometechnologies/synapse-admin:0.11.4"
-IMG_MINIO="minio/minio:RELEASE.2025-09-07T16-13-09Z"
+# Репозиторий minio/minio на Docker Hub отдаёт 404 и "pull access denied";
+# официальные образы остались на quay.io, тег тот же.
+IMG_MINIO="quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
 IMG_NGINX="nginx:1.31.4-alpine"
 IMG_CERTBOT="certbot/certbot:v5.7.0"
 IMG_COTURN="coturn/coturn:4.17.2-alpine"
@@ -682,6 +684,10 @@ email:
   notif_from: "Matrix <${SMTP_FROM}>"
   enable_tls: true
   require_transport_security: true
+  # Без этого Synapse не отправляет ничего: по умолчанию enable_notifs = false,
+  # и настроенный SMTP просто лежал бы в конфиге мёртвым грузом. Включаем
+  # письма о пропущенных сообщениях и приглашениях.
+  enable_notifs: true
 SMTP
 fi)
 
@@ -781,6 +787,7 @@ if $USE_MAS; then
     fi
     _MAS_REG="false"
     $OPEN_REGISTRATION && _MAS_REG="true"
+    [ -f lib/mas-config.py ] || err "Не найден lib/mas-config.py — он нужен для настройки MAS. Обновите установку до версии, где lib/ входит в архив релиза, либо положите файл вручную."
     python3 lib/mas-config.py ./config/mas/config.yaml \
         --public-base "https://${DOMAIN}/" \
         --db-uri "postgresql://synapse:${DB_PASS}@postgres:5432/mas" \

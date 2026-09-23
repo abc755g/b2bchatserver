@@ -108,13 +108,17 @@ fi
 
 # ── Режим установки ───────────────────────────────────────
 ADVANCED_SETUP=false
+# Выбранный режим запоминаем: кто один раз прошёл расширенную настройку, при
+# повторном запуске почти наверняка хочет её же, а не «рекомендуемые».
+_MODE_DEFAULT="1"
+[ "$(prev_val INSTALL_ADVANCED_SETUP '')" = "true" ] && _MODE_DEFAULT="2"
 echo "  Выберите режим установки:"
 echo ""
 echo "  [1] Установка с рекомендуемыми параметрами (быстро и безопасно)"
 echo "  [2] Расширенная настройка (ручной выбор параметров)"
 echo ""
-read -rp "$(echo -e "${BLUE}>>${NC} Выбор [1]: ")" INSTALL_MODE_CHOICE
-INSTALL_MODE_CHOICE="${INSTALL_MODE_CHOICE:-1}"
+read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_MODE_DEFAULT}]: ")" INSTALL_MODE_CHOICE
+INSTALL_MODE_CHOICE="${INSTALL_MODE_CHOICE:-${_MODE_DEFAULT}}"
 if [ "$INSTALL_MODE_CHOICE" = "2" ]; then
     ADVANCED_SETUP=true
     log "Режим: ручной выбор параметров"
@@ -205,6 +209,15 @@ EXTERNAL_IP=$(curl -sf --max-time 5 https://api.ipify.org || \
               hostname -I | awk '{print $1}')
 log "Внешний IP: ${EXTERNAL_IP}"
 
+# Все адреса сервера, а не только тот, с которого он ходит наружу: на сервере с
+# несколькими IP чат может жить на любом из них. docker0 и br-* — мосты Docker,
+# у них тоже scope global, но публиковать на них порты бессмысленно.
+_GLOBAL_IPS=$(ip -4 -o addr show scope global 2>/dev/null \
+    | grep -vE '^[0-9]+: (docker|br-|veth|lo)' \
+    | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')
+_IP_COUNT=$(echo $_GLOBAL_IPS | wc -w)
+[ "$_IP_COUNT" -gt 1 ] && log "Адреса сервера: ${_GLOBAL_IPS}"
+
 echo ""
 info "Проверяем порты..."
 PORTS_BUSY=""
@@ -248,11 +261,27 @@ elif [ -z "$EXTERNAL_IP" ]; then
 elif [[ " ${DOMAIN_IPS} " == *" ${EXTERNAL_IP} "* ]]; then
     log "A-запись: ${DOMAIN} → ${EXTERNAL_IP} — OK"
 else
-    warn "A-запись ${DOMAIN} указывает на: ${DOMAIN_IPS}"
-    warn "Ожидаемый IP сервера: ${EXTERNAL_IP}"
-    if ! ask_yn "Подтвердите продолжение с некорректной A-записью?" "n"; then
-        warn "Установка отменена. Исправьте A-запись и запустите снова."
-        exit 0
+    # Домен может указывать на второй адрес сервера — тогда всё верно, хотя
+    # наружу сервер ходит с основного. Сверяем со всеми его адресами.
+    _DNS_MATCH=""
+    for _ip in $_GLOBAL_IPS; do
+        if [[ " ${DOMAIN_IPS} " == *" ${_ip} "* ]]; then
+            _DNS_MATCH="$_ip"
+            break
+        fi
+    done
+
+    if [ -n "$_DNS_MATCH" ]; then
+        log "A-запись: ${DOMAIN} → ${_DNS_MATCH} — OK (адрес сервера, отличный от внешнего)"
+        # Раз домен уже ведёт на конкретный адрес, его и предложим для привязки.
+        BIND_IP_SUGGESTED="$_DNS_MATCH"
+    else
+        warn "A-запись ${DOMAIN} указывает на: ${DOMAIN_IPS}"
+        warn "Ожидаемый IP сервера: ${EXTERNAL_IP}"
+        if ! ask_yn "Подтвердите продолжение с некорректной A-записью?" "n"; then
+            warn "Установка отменена. Исправьте A-запись и запустите снова."
+            exit 0
+        fi
     fi
 fi
 
@@ -295,6 +324,10 @@ if $ADVANCED_SETUP; then
     else
         log "Звонки: отключены"
     fi
+elif [ "$MODIFY_MODE" = "true" ]; then
+    [ "$(prev_bool INSTALL_USE_CALLS 'true')" = "y" ] && USE_CALLS=true || USE_CALLS=false
+    $USE_CALLS && log "Звонки: включены (как было настроено ранее)" \
+               || log "Звонки: отключены (как было настроено ранее)"
 else
     log "Звонки: включены (рекомендуемый режим)"
 fi
@@ -362,6 +395,22 @@ if $ADVANCED_SETUP; then
         $USE_FLUFFYCHAT && CLIENTS_STR="${CLIENTS_STR} FluffyChat"
         log "Клиенты:${CLIENTS_STR}"
     fi
+elif [ "$MODIFY_MODE" = "true" ]; then
+    # Прежний набор клиентов сохраняем: иначе быстрый прогон по «рекомендуемым»
+    # молча снёс бы уже установленные Cinny и FluffyChat.
+    [ "$(prev_val INSTALL_USE_B2B '')" = "true" ]        && USE_B2B=true
+    [ "$(prev_val INSTALL_USE_ELEMENT '')" = "true" ]    && USE_ELEMENT=true
+    [ "$(prev_val INSTALL_USE_CINNY '')" = "true" ]      && USE_CINNY=true
+    [ "$(prev_val INSTALL_USE_FLUFFYCHAT '')" = "true" ] && USE_FLUFFYCHAT=true
+    if ! $USE_B2B && ! $USE_ELEMENT && ! $USE_CINNY && ! $USE_FLUFFYCHAT; then
+        USE_ELEMENT=true
+    fi
+    _CLIENTS_STR=""
+    $USE_B2B        && _CLIENTS_STR="${_CLIENTS_STR} B2B-связи"
+    $USE_ELEMENT    && _CLIENTS_STR="${_CLIENTS_STR} Element"
+    $USE_CINNY      && _CLIENTS_STR="${_CLIENTS_STR} Cinny"
+    $USE_FLUFFYCHAT && _CLIENTS_STR="${_CLIENTS_STR} FluffyChat"
+    log "Клиенты:${_CLIENTS_STR} (как было настроено ранее)"
 else
     USE_B2B=false
     USE_ELEMENT=true
@@ -378,7 +427,7 @@ echo ""
 
 USE_MINIO=false
 if $ADVANCED_SETUP; then
-    if ask_yn "Подтвердите включение S3-хранилища медиа (MinIO)?" "$(prev_bool INSTALL_USE_MINIO 'false')"; then
+    if ask_yn "Подтвердите включение S3-хранилища медиа (MinIO)?" "$(prev_bool INSTALL_USE_MINIO 'true')"; then
         USE_MINIO=true
         log "MinIO: включен"
     else
@@ -386,6 +435,11 @@ if $ADVANCED_SETUP; then
         # Сбрасываем порт, чтобы не протаскивать старое значение
         MINIO_PORT=""
     fi
+elif [ "$(prev_bool INSTALL_USE_MINIO 'false')" = "y" ]; then
+    # На уже настроенном сервере молча выключать S3-хранилище нельзя: медиа,
+    # уже уехавшие в MinIO, стали бы недоступны.
+    USE_MINIO=true
+    log "MinIO: включен (как было настроено ранее)"
 else
     log "MinIO: отключен (рекомендуемый режим)"
     MINIO_PORT=""
@@ -447,8 +501,7 @@ fi
 # настройке, либо когда это действительно нужно — у сервера несколько адресов
 # или 80-й порт уже занят другим сервисом на всех интерфейсах.
 BIND_IP=$(prev_val INSTALL_BIND_IP "")
-_GLOBAL_IPS=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')
-_IP_COUNT=$(echo $_GLOBAL_IPS | wc -w)
+# _GLOBAL_IPS и _IP_COUNT посчитаны в блоке проверки окружения.
 _PORT80_BUSY=false
 if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\[::\]|\*):80$'; then
     _PORT80_BUSY=true
@@ -462,9 +515,23 @@ if $ADVANCED_SETUP || [ "$_IP_COUNT" -gt 1 ] || $_PORT80_BUSY; then
     fi
     [ "$_IP_COUNT" -gt 1 ] && echo "  Адреса сервера: ${_GLOBAL_IPS}"
     _BIND_DEFAULT="n"
-    { [ -n "$BIND_IP" ] || $_PORT80_BUSY; } && _BIND_DEFAULT="y"
+    { [ -n "$BIND_IP" ] || $_PORT80_BUSY || [ "$_IP_COUNT" -gt 1 ]; } && _BIND_DEFAULT="y"
     if ask_yn "Публиковать порты чата только на одном IP?" "$_BIND_DEFAULT"; then
-        BIND_IP=$(ask "Укажите IP для публикации портов" "${BIND_IP:-${_GLOBAL_IPS%% *}}")
+        if [ -n "$BIND_IP" ]; then
+            BIND_IP=$(ask "Укажите IP для публикации портов" "$BIND_IP")
+        elif [ -n "${BIND_IP_SUGGESTED:-}" ]; then
+            # Домен уже указывает на конкретный адрес сервера — почти наверняка
+            # именно на нём чат и должен слушать.
+            BIND_IP=$(ask "Укажите IP для публикации портов" "$BIND_IP_SUGGESTED")
+        elif [ "$_IP_COUNT" -gt 1 ]; then
+            # Какой из адресов нужен — знает только администратор. Молча
+            # подставлять первый нельзя: Enter по инерции увёл бы чат не на тот.
+            while [ -z "$BIND_IP" ]; do
+                BIND_IP=$(ask "Укажите IP для публикации портов (из списка выше)")
+            done
+        else
+            BIND_IP=$(ask "Укажите IP для публикации портов" "${_GLOBAL_IPS%% *}")
+        fi
     else
         BIND_IP=""
     fi
@@ -479,7 +546,7 @@ echo ""
 BACKUP_ENABLED=false
 BACKUP_LOCAL=false
 BACKUP_S3=false
-BACKUP_DIR=$(prev_val INSTALL_BACKUP_LOCAL "/opt/backups/matrix")
+BACKUP_DIR=$(prev_val INSTALL_BACKUP_LOCAL "/srv/backups/matrix")
 BACKUP_DAYS=$(prev_val INSTALL_BACKUP_DAYS "30")
 BACKUP_MEDIA=false
 BACKUP_SCHEDULE=$(prev_val INSTALL_BACKUP_SCHEDULE "1")
@@ -552,14 +619,14 @@ if $ADVANCED_SETUP; then
         if ! ask_yn "Подтвердите продолжение без бэкапов?" "n"; then
             BACKUP_ENABLED=true
             BACKUP_LOCAL=true
-            BACKUP_DIR="/opt/backups/matrix"
+            BACKUP_DIR="/srv/backups/matrix"
             warn "Включены локальные бэкапы по умолчанию"
         fi
     fi
 else
     BACKUP_ENABLED=true
     BACKUP_LOCAL=true
-    BACKUP_DIR="/opt/backups/matrix"
+    BACKUP_DIR="/srv/backups/matrix"
     BACKUP_DAYS="30"
     BACKUP_S3=false
     BACKUP_MEDIA=false
@@ -681,6 +748,9 @@ if $ADVANCED_SETUP; then
     else
         log "Регистрация: только через администратора"
     fi
+elif [ "$MODIFY_MODE" = "true" ] && [ "$(prev_bool INSTALL_OPEN_REGISTRATION 'false')" = "y" ]; then
+    OPEN_REGISTRATION=true
+    log "Регистрация: открытая (как было настроено ранее)"
 else
     log "Регистрация: только через администратора (рекомендуемый режим)"
 fi
@@ -1002,10 +1072,13 @@ else
     warn "Не удалось скачать архив из GitHub Releases, используем локальные файлы..."
 
     if [ -f "${SOURCE_DIR}/start.sh" ] && [ -f "${SOURCE_DIR}/manage.sh" ] && \
+       [ -f "${SOURCE_DIR}/lib/mas-config.py" ] && \
        [ -f "${SOURCE_DIR}/config/synapse/log.config" ] && [ -f "${SOURCE_DIR}/config/nginx/matrix-http.conf" ]; then
         if [ "${SOURCE_DIR}" != "${INSTALL_DIR}" ]; then
             cp -f "${SOURCE_DIR}/start.sh" ./start.sh
             cp -f "${SOURCE_DIR}/manage.sh" ./manage.sh
+            mkdir -p ./lib
+            cp -f "${SOURCE_DIR}/lib/mas-config.py" ./lib/mas-config.py
             cp -f "${SOURCE_DIR}/config/synapse/log.config" ./config/synapse/log.config
             cp -f "${SOURCE_DIR}/config/nginx/matrix-http.conf" ./config/nginx/matrix-http.conf
         fi
@@ -1080,6 +1153,14 @@ trap 'rm -f "$SECRETS_FILE"' EXIT
 INSTALL_FROM_INSTALL_SH=true bash start.sh $PARAMS --env-file "$SECRETS_FILE"
 rm -f "$SECRETS_FILE"
 trap - EXIT
+
+# start.sh каждый раз пересоздаёт .env, поэтому режим дописываем после него.
+if [ -f "${INSTALL_DIR}/.env" ]; then
+    sed -i '/^INSTALL_ADVANCED_SETUP=/d; /^INSTALL_USE_B2B=/d' "${INSTALL_DIR}/.env"
+    echo "INSTALL_ADVANCED_SETUP=${ADVANCED_SETUP}" >> "${INSTALL_DIR}/.env"
+    # USE_B2B живёт только в install.sh, start.sh про него не знает и в .env не пишет.
+    echo "INSTALL_USE_B2B=${USE_B2B}" >> "${INSTALL_DIR}/.env"
+fi
 
 # ── Шпаргалка по управлению ───────────────────────────────
 echo ""
