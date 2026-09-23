@@ -1499,7 +1499,11 @@ if $USE_MAS && [ -n "$ADMIN_PASS" ]; then
             manage register-user --yes --ignore-password-complexity \
             --password "${ADMIN_PASS}" --admin "${ADMIN_USER}" 2>&1) && \
             log "Пользователь @${ADMIN_USER}:${SERVER_NAME} создан" || \
-            warn "Не удалось создать пользователя: ${_MAS_REG_OUT}"
+            err "Не удалось создать пользователя в MAS: ${_MAS_REG_OUT}
+     Без администратора сервером невозможно управлять, поэтому останавливаемся:
+     раньше установка досчитывала до конца и показывала экран успеха, хотя
+     аккаунта не было. Стек при этом уже запущен — исправьте причину и
+     запустите install.sh снова, режим «изменить настройки»."
     fi
 elif [ "$INSTALL_MODE" = "install" ] || [ "$INSTALL_MODE" = "reinstall" ]; then
     if [ -n "$ADMIN_PASS" ]; then
@@ -1729,6 +1733,54 @@ echo "Остановить: ./manage.sh stop"
 echo "Здоровье:   ./manage.sh health"
 echo "Порты:      cat ports.txt"
 echo ""
+
+# ── Итоговая самопроверка ─────────────────────────────────
+# Установка может доехать до конца, а сервер при этом окажется нерабочим:
+# аккаунт не создался, делегация домена не отдаётся. Раньше такое всплывало
+# только когда пользователь не мог войти. Проверяем прямо здесь и говорим вслух.
+echo ""
+info "Проверяем, что сервер действительно работает..."
+_CHECK_FAILED=false
+
+_HTTP=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "https://${DOMAIN}/_matrix/client/versions" || echo "000")
+if [ "$_HTTP" = "200" ]; then
+    log "Matrix API отвечает"
+else
+    warn "Matrix API не отвечает (HTTP ${_HTTP}) — проверьте ./manage.sh logs --service synapse"
+    _CHECK_FAILED=true
+fi
+
+if [ -n "$ADMIN_TOKEN" ]; then
+    log "Вход администратора проверен: @${ADMIN_USER}:${SERVER_NAME}"
+else
+    warn "Войти под @${ADMIN_USER}:${SERVER_NAME} не удалось."
+    warn "Аккаунт мог не создаться, либо логин или пароль не подошли."
+    warn "Создать администратора вручную:"
+    warn "  docker compose exec mas mas-cli -c /config/config.yaml manage register-user --admin ЛОГИН"
+    _CHECK_FAILED=true
+fi
+
+# Домен пользователей отличается от домена сервера — значит нужна делегация,
+# иначе федерация и мобильные клиенты не найдут сервер по адресу @user:SERVER_NAME.
+if [ "$SERVER_NAME" != "$DOMAIN" ]; then
+    _WK=$(curl -s -m 15 "https://${SERVER_NAME}/.well-known/matrix/server" || true)
+    if printf '%s' "$_WK" | grep -q "${DOMAIN}"; then
+        log "Делегация ${SERVER_NAME} → ${DOMAIN} работает"
+    else
+        warn "Делегация не настроена: https://${SERVER_NAME}/.well-known/matrix/server"
+        warn "не указывает на ${DOMAIN} (ответ: ${_WK:-пусто})."
+        warn "Адреса пользователей выглядят как @логин:${SERVER_NAME}, и без этого файла"
+        warn "другие серверы и мобильные клиенты ваш сервер не найдут. Настройте отдачу"
+        warn "на ${SERVER_NAME}:  {\"m.server\": \"${DOMAIN}:443\"}"
+        _CHECK_FAILED=true
+    fi
+fi
+
+if $_CHECK_FAILED; then
+    echo ""
+    warn "Установка завершена, но проверки выше не прошли — сервер пока нерабочий."
+    echo ""
+fi
 
 # ── Что делать дальше ─────────────────────────────────────
 echo "╔══════════════════════════════════════════════════════════╗"
