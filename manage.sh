@@ -715,6 +715,10 @@ for d in items:
             echo "$_TOK"
             echo ""
             info "Вставьте access token при входе в Synapse Admin UI"
+            warn "Токен даёт права администратора Synapse, а напечатан здесь открыто —"
+            warn "он остаётся в истории терминала, в логах и на скриншотах."
+            warn "Закончив работу, отзовите все сессии:  ./manage.sh mas kill-sessions ${ADMIN_USER}"
+            warn "Каждый вызов admin-token создаёт новую сессию; сами они не истекают."
         else
             read -rsp "$(echo -e "${BLUE}?${NC} Пароль ${ADMIN_USER}: ")" _PW; echo ""
             _TOK=$(curl -sf -X POST "https://${DOMAIN}/_matrix/client/v3/login" \
@@ -769,7 +773,15 @@ for d in items:
     mas)
         mas_enabled || err "MAS не включён"
         [ ${#MAS_ARGS[@]} -eq 0 ] && { mas_cli manage --help; exit 0; }
-        mas_cli manage "${MAS_ARGS[@]}"
+        # Здесь команду набирает человек, поэтому пробрасываем терминал.
+        # mas_cli ходит с -T (без TTY) — это нужно там, где мы забираем вывод
+        # в переменную, но register-user в таком режиме молча пропускает запрос
+        # пароля и создаёт аккаунт, в который нельзя войти.
+        if [ -t 0 ]; then
+            docker compose exec mas mas-cli -c /config/config.yaml manage "${MAS_ARGS[@]}"
+        else
+            mas_cli manage "${MAS_ARGS[@]}"
+        fi
         ;;
 
     mas-migrate)
@@ -801,10 +813,20 @@ for d in items:
         ADMIN_USER=$(grep "^INSTALL_ADMIN_USER=" .env | cut -d= -f2)
 
         echo ""
-        warn "Используйте эту команду только если вы не можете войти в Admin UI."
-        warn "Для смены пароля обычного пользователя — зайдите в Admin UI → Users."
-        echo ""
-        info "Экстренный сброс пароля администратора через базу данных."
+        if mas_enabled; then
+            # Admin UI работает с Synapse, а пароли живут в MAS. Пароль, выставленный
+            # через панель, попадёт только в базу Synapse, где его никто не спросит:
+            # при делегированной аутентификации вход проверяет MAS. Поэтому с MAS это
+            # не «экстренная» команда, а обычный способ сменить пароль.
+            info "Смена пароля через MAS — обычный способ при включённой делегации."
+            info "Через Admin UI пароли менять нельзя: панель пишет в Synapse, а"
+            info "проверяет их MAS, и человек не сможет войти."
+        else
+            warn "Используйте эту команду только если вы не можете войти в Admin UI."
+            warn "Для смены пароля обычного пользователя — зайдите в Admin UI → Users."
+            echo ""
+            info "Экстренный сброс пароля администратора через базу данных."
+        fi
         echo ""
         read -rp "$(echo -e "${BLUE}?${NC} Логин пользователя [${ADMIN_USER}]: ")" _TARGET_USER
         _TARGET_USER="${_TARGET_USER:-$ADMIN_USER}"
