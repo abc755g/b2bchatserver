@@ -873,13 +873,25 @@ no-tls
 no-dtls
 TURN
 
+    # Адрес, который LiveKit объявляет клиентам для медиапотока.
+    # С --bind-ip порты 50000-50010 опубликованы только на указанном адресе, а
+    # автоопределение возьмёт адрес исходящего трафика — то есть основной. Тогда
+    # клиент получает кандидата, по которому никто не слушает: сигнальное
+    # соединение живёт, звонок «идёт», а ICE молча падает в failed и звука нет.
+    if [ -n "$BIND_IP" ]; then
+        _LK_IP="  use_external_ip: false
+  node_ip: ${BIND_IP}"
+    else
+        _LK_IP="  use_external_ip: true"
+    fi
+
     cat > ./config/livekit/livekit.yaml << LIVEKIT
 port: 7880
 rtc:
   tcp_port: 7881
   port_range_start: 50000
   port_range_end: 50010
-  use_external_ip: true
+${_LK_IP}
 keys:
   ${LIVEKIT_KEY}: ${LIVEKIT_SECRET}
 logging:
