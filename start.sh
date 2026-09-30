@@ -715,6 +715,13 @@ cat > ./config/synapse/Dockerfile << DOCKERFILE
 FROM ${IMG_SYNAPSE}
 USER root
 RUN pip install --no-cache-dir --quiet ${_SYNAPSE_PKGS}
+# Каталог медиа создаём в образе и отдаём пользователю Synapse (uid 991).
+# Без этого Docker создаёт том synapse_media сам — пустым и от root с правами
+# 755, наследовать владельца ему неоткуда, и загрузка файлов падает с
+# "PermissionError: [Errno 13] Permission denied: /data/media_store".
+# Права из образа Docker переносит только в свежий том, поэтому для уже
+# существующих установок ниже есть отдельная проверка при запуске.
+RUN mkdir -p /data/media_store && chown 991:991 /data/media_store
 USER 991
 DOCKERFILE
 
@@ -1455,8 +1462,23 @@ for i in $(seq 1 60); do
 done
 
 # ── Права на media_store ──────────────────────────────────
-docker compose exec -T synapse chown -R 991:991 /data/media_store 2>/dev/null && \
-    log "Права на media_store выставлены" || true
+# Том synapse_media Docker создаёт от root с правами 755, а Synapse работает
+# под uid 991 — без смены владельца загрузка файлов падает с
+# "PermissionError: [Errno 13] Permission denied: /data/media_store".
+#
+# Менять владельца нужно ОТ ROOT: раньше эта команда шла под 991, который чужой
+# каталог перехватить не может, а `|| true` прятал провал — в итоге она молча
+# ничего не делала, и загрузка файлов была сломана на всех установках.
+_MEDIA_UID=$(docker compose exec -T synapse stat -c %u /data/media_store 2>/dev/null | tr -d '\r')
+if [ "$_MEDIA_UID" != "991" ]; then
+    if docker compose exec -T -u root synapse chown -R 991:991 /data/media_store 2>/dev/null; then
+        log "Права на media_store выставлены"
+    else
+        warn "Не удалось сменить владельца /data/media_store (сейчас uid ${_MEDIA_UID:-неизвестен})."
+        warn "Загрузка файлов будет падать с Permission denied. Вручную:"
+        warn "  docker compose exec -u root synapse chown -R 991:991 /data/media_store"
+    fi
+fi
 
 # ── MinIO bucket ──────────────────────────────────────────
 if $USE_MINIO; then
@@ -1749,6 +1771,17 @@ if [ "$_HTTP" = "200" ]; then
     log "Matrix API отвечает"
 else
     warn "Matrix API не отвечает (HTTP ${_HTTP}) — проверьте ./manage.sh logs --service synapse"
+    _CHECK_FAILED=true
+fi
+
+# Хранилище медиа: проверяем записью, а не правами. Пять дней загрузка файлов
+# была сломана именно потому, что никто её не проверял — установка заканчивалась
+# успехом, а первый же .xlsx получал 500.
+if docker compose exec -T synapse sh -c 'touch /data/media_store/.probe && rm -f /data/media_store/.probe' 2>/dev/null; then
+    log "Хранилище медиа доступно для записи"
+else
+    warn "Synapse не может писать в /data/media_store — загрузка файлов не заработает."
+    warn "  docker compose exec -u root synapse chown -R 991:991 /data/media_store"
     _CHECK_FAILED=true
 fi
 

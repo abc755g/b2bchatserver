@@ -119,6 +119,62 @@ curl -fsSL https://github.com/abc755g/b2bchatserver/releases/latest/download/ins
 > Admin UI остаётся полезен для просмотра пользователей и комнат, медиа,
 > статистики сервера и деактивации.
 
+## Регистрация по токенам (удобнее для онбординга)
+
+У `register-user` есть неприятная сторона: пароль проходит через руки
+администратора — попадает в терминал, в историю оболочки, в переписку, где вы его
+передаёте. Альтернатива — выдать одноразовый токен, а пароль человек задаст себе
+сам, и вы его никогда не увидите.
+
+### Включение
+
+Две настройки в `config/mas/config.yaml`:
+
+```yaml
+account:
+  registration_token_required: true      # ставьте ПЕРВЫМ
+  password_registration_enabled: true
+```
+
+```bash
+docker compose restart mas
+```
+
+> Порядок важен. Если включить `password_registration_enabled` без
+> `registration_token_required`, регистрация станет открытой для любого желающего
+> из интернета. Поэтому сначала требование токена, потом сама регистрация.
+>
+> `./manage.sh registration` переключает только `password_registration_enabled` и
+> в этом режиме покажет регистрацию как «ОТКРЫТУЮ», хотя без токена
+> зарегистрироваться нельзя. На фактическое поведение это не влияет.
+
+### Выдача токенов
+
+```bash
+./manage.sh mas issue-user-registration-token                     # одноразовый, без срока
+./manage.sh mas issue-user-registration-token --usage-limit 10    # на 10 человек
+./manage.sh mas issue-user-registration-token --expires-in 86400  # годен сутки
+./manage.sh mas issue-user-registration-token --unlimited         # без ограничения по числу
+./manage.sh mas issue-user-registration-token --token СВОЯ_СТРОКА
+```
+
+Без `--usage-limit` и `--unlimited` токен срабатывает один раз, без
+`--expires-in` не истекает.
+
+### Что передать сотруднику
+
+Ссылку `https://ВАШ_ДОМЕН/register` и токен. Логин и пароль человек придумывает
+сам. Требования к логину те же: только `a-z 0-9 . _ = - / +`.
+
+Токен — секрет на время действия: по нему создаётся аккаунт на вашем сервере.
+Одноразовые токены с коротким сроком безопаснее одного общего `--unlimited`.
+
+### Когда закончите набор
+
+```bash
+./manage.sh registration        # выбрать «закрытая»
+```
+
 **Мобильное приложение:**
 - iOS: App Store → **Element**
 - Android: Google Play → **Element**
