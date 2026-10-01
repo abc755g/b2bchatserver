@@ -42,6 +42,12 @@ usage() {
     echo "  --oidc-name      Название кнопки входа      (по умолчанию: SSO)"
     echo "  --max-upload     Макс. размер файла          (по умолчанию: 500M)"
     echo ""
+    echo "Шифрование переписки (действует на клиенты семейства Element):"
+    echo "  --e2ee MODE      backup — сквозное шифрование и обязательный ключ"
+    echo "                            восстановления (по умолчанию)"
+    echo "                   off    — новые комнаты без шифрования, история"
+    echo "                            хранится на сервере в открытом виде"
+    echo ""
     echo "SMTP:"
     echo "  --smtp-host      SMTP сервер                 (smtp.yandex.ru)"
     echo "  --smtp-port      SMTP порт                   (465)"
@@ -102,6 +108,7 @@ OPEN_REGISTRATION=false
 MAX_UPLOAD="500M"
 FEDERATION_MODE="whitelist"
 FEDERATION_SERVERS=""
+E2EE_MODE="backup"
 
 SMTP_HOST=""
 SMTP_PORT=""
@@ -177,6 +184,7 @@ while [[ $# -gt 0 ]]; do
         --max-upload)       MAX_UPLOAD="$2";       shift 2 ;;
         --federation-mode)    FEDERATION_MODE="$2";    shift 2 ;;
         --federation-servers) FEDERATION_SERVERS="$2"; shift 2 ;;
+        --e2ee)             E2EE_MODE="$2";        shift 2 ;;
         --smtp-host)        SMTP_HOST="$2";        shift 2 ;;
         --smtp-port)        SMTP_PORT="$2";        shift 2 ;;
         --smtp-user)        SMTP_USER="$2";        shift 2 ;;
@@ -256,6 +264,11 @@ if [ -n "$MISSING" ]; then
     echo -e "${RED}[ERR]${NC} Не указаны обязательные параметры:${MISSING}"
     usage; exit 1
 fi
+
+case "$E2EE_MODE" in
+    backup|off) ;;
+    *) err "Неизвестный режим шифрования: --e2ee ${E2EE_MODE}. Допустимо: backup, off." ;;
+esac
 
 # ── Определяем режим установки ───────────────────────────
 # install   — первая установка (нет .env)
@@ -775,6 +788,7 @@ INSTALL_BACKUP_SCHEDULE=${BACKUP_SCHEDULE}
 INSTALL_BIND_IP=${BIND_IP}
 INSTALL_FEDERATION_MODE=${FEDERATION_MODE}
 INSTALL_FEDERATION_SERVERS=${FEDERATION_SERVERS}
+INSTALL_E2EE=${E2EE_MODE}
 INSTALL_USE_MAS=${USE_MAS}
 INSTALL_OIDC_ISSUER=${OIDC_ISSUER}
 INSTALL_OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
@@ -823,7 +837,11 @@ if $USE_ELEMENT; then
     "default_theme": "light",
     "disable_custom_urls": false,
     "disable_guests": false,
-    "default_country_code": "RU"$(if $USE_CALLS; then cat << CALLS
+    "default_country_code": "RU"$(if [ "$E2EE_MODE" = "backup" ]; then cat << VERIFY
+,
+    "force_verification": true
+VERIFY
+fi)$(if $USE_CALLS; then cat << CALLS
 ,
     "features": {
         "feature_group_calls": true
@@ -1138,20 +1156,26 @@ cat >> ./docker-compose.yml << COMPOSE
 COMPOSE
 
 # ── Генерируем nginx конфиг ───────────────────────────────
-if $USE_CALLS; then
-    WELL_KNOWN_CLIENT_JSON="{\"m.homeserver\":{\"base_url\":\"https://${DOMAIN}\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://${DOMAIN}/livekit-jwt\"}]}"
-else
-    WELL_KNOWN_CLIENT_JSON="{\"m.homeserver\":{\"base_url\":\"https://${DOMAIN}\"}}"
-fi
+# Политика шифрования для клиентов Element. Synapse её не применяет — клиенты
+# читают ключ io.element.e2ee из /.well-known/matrix/client домена пользователей.
+#   backup — шифрование как есть, но без ключа восстановления работать не дадут:
+#            иначе при смене ноутбука зашифрованная история теряется безвозвратно,
+#            ключи комнат хранятся только на устройствах пользователя.
+#   off    — новые комнаты создаются без шифрования, история читается с любого
+#            устройства после входа. Уже зашифрованные комнаты так и остаются.
+case "$E2EE_MODE" in
+    backup) E2EE_WELL_KNOWN_JSON="\"io.element.e2ee\":{\"secure_backup_required\":true,\"secure_backup_setup_methods\":[\"key\"]}" ;;
+    off)    E2EE_WELL_KNOWN_JSON="\"io.element.e2ee\":{\"default\":false}" ;;
+esac
+
+WELL_KNOWN_CLIENT_JSON="\"m.homeserver\":{\"base_url\":\"https://${DOMAIN}\"}"
+$USE_CALLS && WELL_KNOWN_CLIENT_JSON="${WELL_KNOWN_CLIENT_JSON},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://${DOMAIN}/livekit-jwt\"}]"
+$USE_MAS   && WELL_KNOWN_CLIENT_JSON="${WELL_KNOWN_CLIENT_JSON},\"org.matrix.msc2965.authentication\":{\"issuer\":\"https://${DOMAIN}/\",\"account\":\"https://${DOMAIN}/account/\"}"
+WELL_KNOWN_CLIENT_JSON="{${WELL_KNOWN_CLIENT_JSON},${E2EE_WELL_KNOWN_JSON}}"
 
 mkdir -p ./config/nginx/well-known/matrix
 echo "{\"m.server\":\"${DOMAIN}:${PORT}\"}" > ./config/nginx/well-known/matrix/server
-if $USE_MAS; then
-    echo "${WELL_KNOWN_CLIENT_JSON%\}}, \"org.matrix.msc2965.authentication\": {\"issuer\": \"https://${DOMAIN}/\", \"account\": \"https://${DOMAIN}/account/\"}}" \
-        > ./config/nginx/well-known/matrix/client
-else
-    echo "${WELL_KNOWN_CLIENT_JSON}" > ./config/nginx/well-known/matrix/client
-fi
+echo "${WELL_KNOWN_CLIENT_JSON}" > ./config/nginx/well-known/matrix/client
 
 cat > ./config/nginx/matrix.conf << NGINX
 # Адреса контейнеров резолвим через DNS Docker на каждый запрос, а не один раз
@@ -1840,6 +1864,15 @@ if [ "$SERVER_NAME" != "$DOMAIN" ]; then
         warn "другие серверы и мобильные клиенты ваш сервер не найдут. Настройте отдачу"
         warn "на ${SERVER_NAME}:  {\"m.server\": \"${DOMAIN}:443\"}"
         _CHECK_FAILED=true
+    fi
+    # Политику шифрования клиент берёт из well-known домена пользователей, а не
+    # из ${DOMAIN}: без неё на ${SERVER_NAME} выбранный режим шифрования не действует.
+    _WKC=$(curl -s -m 15 "https://${SERVER_NAME}/.well-known/matrix/client" || true)
+    if ! printf '%s' "$_WKC" | grep -q "io.element.e2ee"; then
+        warn "На https://${SERVER_NAME}/.well-known/matrix/client нет политики шифрования —"
+        warn "Element её не увидит, режим «${E2EE_MODE}» действовать не будет. Отдавайте там"
+        warn "содержимое этого файла целиком (CORS: Access-Control-Allow-Origin: *):"
+        warn "  ${WELL_KNOWN_CLIENT_JSON}"
     fi
 fi
 

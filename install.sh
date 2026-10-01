@@ -850,6 +850,50 @@ case "$_FED_CHOICE" in
         ;;
 esac
 
+# ── Блок 10a: Шифрование переписки ───────────────────────
+if $ADVANCED_SETUP; then
+    title "Блок 10a — Шифрование переписки"
+fi
+echo ""
+
+# Спрашиваем и в рекомендуемом режиме: от выбора зависит, переживёт ли
+# переписка смену ноутбука, а это решение компании, а не установщика.
+_E2EE_PREV=$(prev_val INSTALL_E2EE "backup")
+_E2EE_DEFAULT="1"
+[ "$_E2EE_PREV" = "off" ] && _E2EE_DEFAULT="2"
+
+info "Сквозное шифрование: сервер хранит только шифротекст, ключи — на устройствах"
+info "сотрудников. Сменил ноутбук без ключа восстановления — старая переписка"
+info "не расшифруется, и администратор её не вернёт."
+echo ""
+echo "  [1] Шифровать, ключ восстановления обязателен (рекомендуется)"
+echo "      Element не даст начать работу, пока сотрудник не создаст ключ;"
+echo "      на новом устройстве ввёл ключ — история на месте."
+echo "  [2] Не шифровать новые комнаты"
+echo "      История на сервере в открытом виде, доступна с любого устройства."
+echo "      Читать её может любой, у кого есть доступ к серверу, базе или бэкапам."
+echo ""
+read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_E2EE_DEFAULT}]: ")" _E2EE_CHOICE </dev/tty
+_E2EE_CHOICE="${_E2EE_CHOICE:-${_E2EE_DEFAULT}}"
+
+if [ "$_E2EE_CHOICE" = "2" ]; then
+    E2EE_MODE="off"
+    log "Шифрование: новые комнаты без шифрования"
+    if [ "$MODIFY_MODE" = "true" ] && [ "$_E2EE_PREV" != "off" ]; then
+        warn "Уже зашифрованные комнаты останутся зашифрованными — выключить шифрование"
+        warn "в существующей комнате Matrix не позволяет."
+    fi
+else
+    E2EE_MODE="backup"
+    log "Шифрование: включено, ключ восстановления обязателен"
+    if [ "$MODIFY_MODE" = "true" ]; then
+        warn "При следующем запуске Element попросит каждого сотрудника создать ключ"
+        warn "восстановления — без этого работать не даст. Предупредите сотрудников."
+    fi
+fi
+[ "$SERVER_NAME" != "$DOMAIN" ] && \
+    warn "Политика шифрования отдаётся с ${SERVER_NAME}/.well-known/matrix/client — после установки проверьте, что этот файл там есть."
+
 # ── Блок 11: Email уведомления ────────────────────────────
 if $ADVANCED_SETUP; then
     title "Блок 11 — Email уведомления"
@@ -1012,6 +1056,11 @@ _FED_LABEL="whitelist (пустой)"
 [ "$FEDERATION_MODE" = "open" ]     && _FED_LABEL="открытая"
 [ "$FEDERATION_MODE" = "whitelist" ] && [ -n "$FEDERATION_SERVERS" ] && _FED_LABEL="whitelist: ${FEDERATION_SERVERS//,/, }"
 printf "║  Федерация:       %-39s ║\n" "$_FED_LABEL"
+if [ "$E2EE_MODE" = "off" ]; then
+    printf "║  Шифрование:      %-39s ║\n" "выключено для новых комнат"
+else
+    printf "║  Шифрование:      %-39s ║\n" "включено, ключ восстановления"
+fi
 echo "╠══════════════════════════════════════════════════════════╣"
 if $USE_B2B; then
     printf "║  Клиент:          %-39s ║\n" "B2B-связи"
@@ -1148,6 +1197,7 @@ if $USE_MAS && [ -n "$_OIDC_ISSUER" ] && [ -n "$_OIDC_CLIENT_ID" ]; then
 fi
 PARAMS="${PARAMS} --federation-mode ${FEDERATION_MODE}"
 [ -n "$FEDERATION_SERVERS" ] && PARAMS="${PARAMS} --federation-servers ${FEDERATION_SERVERS}"
+PARAMS="${PARAMS} --e2ee ${E2EE_MODE}"
 
 if $SMTP_ENABLED && [ -n "$SMTP_PASS" ]; then
     PARAMS="${PARAMS} --smtp-host ${SMTP_HOST} --smtp-port ${SMTP_PORT}"
