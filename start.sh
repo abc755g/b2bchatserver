@@ -1154,6 +1154,11 @@ else
 fi
 
 cat > ./config/nginx/matrix.conf << NGINX
+# Адреса контейнеров резолвим через DNS Docker на каждый запрос, а не один раз
+# при старте: иначе nginx не запускается, пока не поднят любой из upstream, а
+# после пересоздания контейнера шлёт запросы на его старый IP и отдаёт 502.
+resolver 127.0.0.11 valid=10s ipv6=off;
+
 # ── HTTP → HTTPS ──────────────────────────────────────────
 server {
     listen 80;
@@ -1187,7 +1192,8 @@ NGINX
 if $USE_ELEMENT; then
     cat >> ./config/nginx/matrix.conf << NGINX
     location / {
-        proxy_pass http://element:80;
+        set \$upstream http://element:80;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
     }
@@ -1199,15 +1205,17 @@ if $USE_MAS; then
     cat >> ./config/nginx/matrix.conf << NGINX
     # Логин, логаут и refresh забирает MAS, остальной Client-Server API — Synapse
     location ~ ^/_matrix/client/(.*)/(login|logout|refresh) {
-        proxy_pass http://mas:8080;
+        set \$upstream http://mas:8080;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }
 
-    location ~ ^/(upstream/|account/|authorize|oauth2/|login|logout|register|consent|device|recovery|complete-compat-sso|link|reauth|assets/|\.well-known/openid-configuration) {
-        proxy_pass http://mas:8080;
+    location ~ ^/(upstream/|account/|authorize|oauth2/|login|logout|register|consent|device|recover|graphql|complete-compat-sso|link|reauth|assets/|\.well-known/(openid-configuration|webfinger|change-password)) {
+        set \$upstream http://mas:8080;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1219,7 +1227,8 @@ fi
 
 cat >> ./config/nginx/matrix.conf << NGINX
     location /_matrix {
-        proxy_pass http://synapse:8008;
+        set \$upstream http://synapse:8008;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1227,7 +1236,8 @@ cat >> ./config/nginx/matrix.conf << NGINX
     }
 
     location /_synapse {
-        proxy_pass http://synapse:8008;
+        set \$upstream http://synapse:8008;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1243,14 +1253,17 @@ cat >> ./config/nginx/matrix.conf << NGINX
     }
 
     location /health {
-        proxy_pass http://synapse:8008/health;
+        set \$upstream http://synapse:8008;
+        proxy_pass \$upstream;
     }
 NGINX
 
 if $USE_CALLS; then
     cat >> ./config/nginx/matrix.conf << NGINX
     location /livekit/ {
-        proxy_pass http://livekit:7880/;
+        set \$upstream http://livekit:7880;
+        rewrite ^/livekit(/.*)\$ \$1 break;
+        proxy_pass \$upstream;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -1259,7 +1272,9 @@ if $USE_CALLS; then
     }
 
     location /livekit-jwt/ {
-        proxy_pass http://livekit-jwt:8080/;
+        set \$upstream http://livekit-jwt:8080;
+        rewrite ^/livekit-jwt(/.*)\$ \$1 break;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1286,7 +1301,8 @@ server {
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
     location / {
-        proxy_pass http://cinny:80;
+        set \$upstream http://cinny:80;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
     }
@@ -1308,7 +1324,8 @@ server {
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
     location / {
-        proxy_pass http://fluffychat:80;
+        set \$upstream http://fluffychat:80;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
     }
@@ -1332,7 +1349,8 @@ server {
     client_max_body_size ${MAX_UPLOAD};
 
     location / {
-        proxy_pass http://minio:9001;
+        set \$upstream http://minio:9001;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_http_version 1.1;
@@ -1356,7 +1374,8 @@ server {
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
     location / {
-        proxy_pass http://synapse-admin:80/;
+        set \$upstream http://synapse-admin:80;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
     }
@@ -1377,7 +1396,8 @@ server {
     client_max_body_size ${MAX_UPLOAD};
 
     location / {
-        proxy_pass http://synapse:8008;
+        set \$upstream http://synapse:8008;
+        proxy_pass \$upstream;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
