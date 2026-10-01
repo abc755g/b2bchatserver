@@ -1510,6 +1510,21 @@ info "Запускаем все сервисы..."
 # пина в Dockerfile без пересборки не подхватится
 docker compose up -d --build
 
+# Конфиги сервисов смонтированы с диска, а `up -d` пересоздаёт только те
+# контейнеры, у которых изменилось описание в compose. При повторном запуске
+# новые homeserver.yaml, matrix.conf, конфиги MAS, LiveKit и Element лежали бы на
+# диске, а сервисы продолжали бы работать со старыми (Element вдобавок копирует
+# свой конфиг один раз при старте). Перезапускаем их явно.
+if [ "$INSTALL_MODE" = "modify" ]; then
+    _RESTART="synapse nginx"
+    $USE_MAS     && _RESTART="${_RESTART} mas"
+    $USE_CALLS   && _RESTART="${_RESTART} coturn livekit"
+    $USE_ELEMENT && _RESTART="${_RESTART} element"
+    $USE_CINNY   && _RESTART="${_RESTART} cinny"
+    info "Перезапускаем сервисы, чтобы они перечитали конфиги..."
+    docker compose restart ${_RESTART}
+fi
+
 info "Ждём Synapse (до 60 сек)..."
 for i in $(seq 1 60); do
     curl -sf https://${DOMAIN}/_matrix/client/versions &>/dev/null && \
@@ -1843,6 +1858,9 @@ fi
 
 if [ -n "$ADMIN_TOKEN" ]; then
     log "Вход администратора проверен: @${ADMIN_USER}:${SERVER_NAME}"
+elif [ -z "$ADMIN_PASS" ] && [ "$INSTALL_MODE" = "modify" ]; then
+    # Повторный запуск без смены пароля: войти проверке нечем, а это не сбой
+    info "Пароль администратора не менялся — вход не проверяли"
 else
     warn "Войти под @${ADMIN_USER}:${SERVER_NAME} не удалось."
     warn "Аккаунт мог не создаться, либо логин или пароль не подошли."
