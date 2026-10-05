@@ -775,11 +775,20 @@ for d in items:
         [ ${#MAS_ARGS[@]} -eq 0 ] && { mas_cli manage --help; exit 0; }
         # Здесь команду набирает человек, поэтому пробрасываем терминал.
         # mas_cli ходит с -T (без TTY) — это нужно там, где мы забираем вывод
-        # в переменную, но register-user в таком режиме молча пропускает запрос
-        # пароля и создаёт аккаунт, в который нельзя войти.
+        # в переменную. Но register-user без --yes открывает интерактивное меню,
+        # а оно на закрытом stdin крутится на 100% CPU и не завершается никогда:
+        # клиент docker отвалится, а процесс внутри контейнера останется.
+        # Убить его изнутри нечем — в образе MAS нет ни оболочки, ни timeout.
         if [ -t 0 ]; then
             docker compose exec mas mas-cli -c /config/config.yaml manage "${MAS_ARGS[@]}"
         else
+            if [ "${MAS_ARGS[0]}" = "register-user" ]; then
+                _YES=false
+                for _A in "${MAS_ARGS[@]:1}"; do
+                    case "$_A" in -y|--yes) _YES=true ;; esac
+                done
+                $_YES || err "register-user без терминала зависает в интерактивном меню. Запустите из терминала (ssh -t) или добавьте --yes и --password ПАРОЛЬ"
+            fi
             mas_cli manage "${MAS_ARGS[@]}"
         fi
         ;;
