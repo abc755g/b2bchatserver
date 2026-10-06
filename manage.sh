@@ -872,7 +872,14 @@ for d in items:
             echo "  Переключить: ./manage.sh password-login on|off"
             exit 0
         fi
-        [ "$_WANT" = "$_NOW" ] && { log "Вход по паролю уже $([ "$_NOW" = on ] && echo включён || echo выключен)"; exit 0; }
+        if [ "$_WANT" = "$_NOW" ]; then
+            # Состояние могли выставить правкой конфига — всё равно записываем
+            # выбор, иначе следующая перенастройка MAS его потеряет.
+            env_put INSTALL_PASSWORD_LOGIN "$([ "$_WANT" = on ] && echo true || echo false)"
+            env_put INSTALL_PASSWORD_LOGIN_CHOICE "$([ "$_WANT" = on ] && echo true || echo false)"
+            log "Вход по паролю уже $([ "$_NOW" = on ] && echo включён || echo выключен) — выбор сохранён"
+            exit 0
+        fi
 
         if [ "$_WANT" = "off" ]; then
             has_external_login || err "Нет другого способа входа: подключите портал (./manage.sh portal-login) или IdP компании (./manage.sh oidc), иначе на сервер не войдёт никто."
