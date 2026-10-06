@@ -99,14 +99,14 @@ if [ -f "${INSTALL_DIR}/.env" ]; then
     echo "  [2] Переустановить полностью  (все данные будут удалены)"
     echo "  [3] Отмена"
     echo ""
-    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [1]: ")" _CHOICE
+    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [1]: ")" _CHOICE </dev/tty
     _CHOICE="${_CHOICE:-1}"
 
     case "$_CHOICE" in
         2)
             echo ""
             warn "Будут удалены все контейнеры и данные: БД, медиафайлы, сертификаты."
-            read -rp "$(echo -e "${RED}[!!]${NC} Введите 'yes' для подтверждения: ")" _CONFIRM
+            read -rp "$(echo -e "${RED}[!!]${NC} Введите 'yes' для подтверждения: ")" _CONFIRM </dev/tty
             [ "$_CONFIRM" != "yes" ] && { warn "Отменено."; exit 0; }
             REINSTALL_FLAG="--reinstall"
             IGNORE_PREV_CONFIG=true
@@ -128,7 +128,7 @@ echo ""
 echo "  [1] Установка с рекомендуемыми параметрами (быстро и безопасно)"
 echo "  [2] Расширенная настройка (ручной выбор параметров)"
 echo ""
-read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_MODE_DEFAULT}]: ")" INSTALL_MODE_CHOICE
+read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_MODE_DEFAULT}]: ")" INSTALL_MODE_CHOICE </dev/tty
 INSTALL_MODE_CHOICE="${INSTALL_MODE_CHOICE:-${_MODE_DEFAULT}}"
 if [ "$INSTALL_MODE_CHOICE" = "2" ]; then
     ADVANCED_SETUP=true
@@ -368,7 +368,7 @@ if $ADVANCED_SETUP; then
     echo "  [2] Установить клиента на свой сервер"
     echo "      (полный контроль, своя инфраструктура)"
     echo ""
-    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_CLIENT_MODE_DEFAULT}]: ")" CLIENT_MODE
+    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_CLIENT_MODE_DEFAULT}]: ")" CLIENT_MODE </dev/tty
     CLIENT_MODE="${CLIENT_MODE:-${_CLIENT_MODE_DEFAULT}}"
 
     if [ "$CLIENT_MODE" = "1" ]; then
@@ -389,7 +389,7 @@ if $ADVANCED_SETUP; then
         echo "  [3] FluffyChat"
         echo "  [4] Все"
         echo ""
-        read -rp "$(echo -e "${BLUE}>>${NC} Выбор (можно несколько, например: 1 2) [${_PREV_CLIENTS}]: ")" CLIENTS_INPUT
+        read -rp "$(echo -e "${BLUE}>>${NC} Выбор (можно несколько, например: 1 2) [${_PREV_CLIENTS}]: ")" CLIENTS_INPUT </dev/tty
         CLIENTS_INPUT="${CLIENTS_INPUT:-${_PREV_CLIENTS}}"
 
         if echo "$CLIENTS_INPUT" | grep -q "4"; then
@@ -590,7 +590,7 @@ if $ADVANCED_SETUP; then
     echo "  [2] S3-совместимое хранилище"
     echo "  [3] Оба варианта"
     echo ""
-    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_BMODE_DEFAULT}]: ")" BACKUP_MODE
+    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_BMODE_DEFAULT}]: ")" BACKUP_MODE </dev/tty
     BACKUP_MODE="${BACKUP_MODE:-${_BMODE_DEFAULT}}"
 
     if [ "$BACKUP_MODE" = "1" ] || [ "$BACKUP_MODE" = "3" ]; then
@@ -619,7 +619,7 @@ if $ADVANCED_SETUP; then
     echo "  [1] Каждый день в 3:00 (рекомендуется)"
     echo "  [2] Каждые 12 часов"
     echo ""
-    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${BACKUP_SCHEDULE}]: ")" BACKUP_SCHEDULE
+    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${BACKUP_SCHEDULE}]: ")" BACKUP_SCHEDULE </dev/tty
     BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-1}"
 
         log "Бэкапы: настроены"
@@ -788,7 +788,7 @@ if $ADVANCED_SETUP; then
     echo "  [1] Только администратор создаёт аккаунты (рекомендуется)"
     echo "  [2] Открытая регистрация (любой может зарегистрироваться)"
     echo ""
-    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_REG_DEFAULT}]: ")" REG_MODE
+    read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_REG_DEFAULT}]: ")" REG_MODE </dev/tty
     REG_MODE="${REG_MODE:-${_REG_DEFAULT}}"
 
     if [ "$REG_MODE" = "2" ]; then
@@ -949,7 +949,7 @@ if $ADVANCED_SETUP; then
         echo "  [3] Gmail"
         echo "  [4] Ввести вручную"
         echo ""
-        read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_SMTP_PROV_DEFAULT}]: ")" SMTP_PROVIDER
+        read -rp "$(echo -e "${BLUE}>>${NC} Выбор [${_SMTP_PROV_DEFAULT}]: ")" SMTP_PROVIDER </dev/tty
         SMTP_PROVIDER="${SMTP_PROVIDER:-${_SMTP_PROV_DEFAULT}}"
 
         case "$SMTP_PROVIDER" in
