@@ -128,7 +128,21 @@ mas_reconfigure() {
         --oidc-issuer "$(env_get INSTALL_OIDC_ISSUER)" \
         --oidc-client-id "$(env_get INSTALL_OIDC_CLIENT_ID)" \
         --oidc-name "$(env_get INSTALL_OIDC_NAME | grep . || echo SSO)" \
-        "${portal[@]}"
+        --passwords "$(env_get INSTALL_PASSWORD_LOGIN | grep -x false || echo true)" \
+        "${portal[@]}" || return 1
+    # mas-config.py не выключит пароли без другого поставщика (например, после
+    # oidc --disable) — в .env пишем то, что реально вышло в конфиге.
+    if grep -A1 "^passwords:" ./config/mas/config.yaml | grep -q "enabled: false"; then
+        env_put INSTALL_PASSWORD_LOGIN false
+    else
+        env_put INSTALL_PASSWORD_LOGIN true
+    fi
+}
+
+# Подключён ли вход в обход пароля: IdP компании или портал с Client ID
+has_external_login() {
+    { [ -n "$(env_get INSTALL_OIDC_ISSUER)" ] && [ -n "$(env_get INSTALL_OIDC_CLIENT_ID)" ]; } \
+        || { [ "$(env_get INSTALL_PORTAL_LOGIN)" = "true" ] && [ -n "$(env_get INSTALL_PORTAL_CLIENT_ID)" ]; }
 }
 
 # ── Справка ───────────────────────────────────────────────
@@ -167,6 +181,8 @@ usage() {
     echo "                            он подтвердил домен; пароль и IdP остаются"
     echo "  portal-login --client-id ID  То же с ID вручную"
     echo "  portal-login --disable    Отключить вход через портал"
+    echo "  password-login [on|off]   Вход по паролю: без аргумента — состояние; off только"
+    echo "                            при подключённом OIDC или портале"
     echo "  mas <команда...>          Прямой вызов mas-cli manage (set-password и др.)"
     echo "  mas-migrate [--apply]     Перенос аккаунтов Synapse в MAS (syn2mas)"
     echo "  password-reset     Экстренный сброс пароля администратора"
@@ -181,7 +197,7 @@ usage() {
 COMMAND="${1:-}"
 SERVICE=""
 FED_LIST=false; FED_ADD=""; FED_REMOVE=""; FED_SYNC=""; FED_MODE=""; FED_TEST=""
-TOKEN=""; WK_PATH="b2b-matrix-verify"; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false
+TOKEN=""; WK_PATH="b2b-matrix-verify"; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false; SWITCH=""
 shift || true
 
 # mas — прозрачная прокладка к mas-cli, свои аргументы не разбираем
@@ -207,6 +223,7 @@ while [[ $# -gt 0 ]]; do
         --name)      OIDC_NAME="$2";      shift 2 ;;
         --disable)   OIDC_DISABLE=true;   shift ;;
         --apply)     APPLY=true;          shift ;;
+        on|off)      SWITCH="$1";         shift ;;
         --help|-h) usage; exit 0 ;;
         *) err "Неизвестный параметр: $1" ;;
     esac
@@ -479,6 +496,9 @@ case "$COMMAND" in
         # С MAS переключатель живёт в его конфиге; enable_registration в Synapse
         # остаётся false и служит только меткой для info/registration
         _apply_registration() {
+            if [ "$1" = "true" ] && mas_enabled && grep -A1 "^passwords:" ./config/mas/config.yaml | grep -q "enabled: false"; then
+                err "Вход по паролю выключен, а без него регистрации по паролю нет. Сначала: ./manage.sh password-login on"
+            fi
             hs_set "enable_registration" "$1"
             if mas_enabled; then
                 sed -i "s|^  password_registration_enabled: .*|  password_registration_enabled: $1|" ./config/mas/config.yaml
@@ -840,6 +860,41 @@ for d in items:
             log "Вход через B2B-портал включён — кнопка на https://$(env_get SYNAPSE_DOMAIN)/login"
             info "Сотрудник, который хоть раз входил в чат портала через этот сервер, попадёт"
             info "в свой аккаунт. Остальным портал объяснит, что сделать; новых аккаунтов он не создаёт."
+        fi
+        ;;
+
+    password-login)
+        mas_enabled || err "Управлять входом по паролю можно только с MAS"
+        _WANT="$SWITCH"
+        _NOW=$(grep -A1 "^passwords:" ./config/mas/config.yaml | grep -q "enabled: false" && echo off || echo on)
+        if [ -z "$_WANT" ]; then
+            [ "$_NOW" = "on" ] && log "Вход по паролю: включён" || warn "Вход по паролю: выключен — вход только через внешних поставщиков"
+            echo "  Переключить: ./manage.sh password-login on|off"
+            exit 0
+        fi
+        [ "$_WANT" = "$_NOW" ] && { log "Вход по паролю уже $([ "$_NOW" = on ] && echo включён || echo выключен)"; exit 0; }
+
+        if [ "$_WANT" = "off" ]; then
+            has_external_login || err "Нет другого способа входа: подключите портал (./manage.sh portal-login) или IdP компании (./manage.sh oidc), иначе на сервер не войдёт никто."
+            warn "Новые входы станут возможны только через внешних поставщиков. Кого они не знают —"
+            warn "не войдёт; открытые сессии продолжат работать. Администратору остаются SSH и ./manage.sh."
+            grep -q "^  password_registration_enabled: true" ./config/mas/config.yaml && \
+                warn "Регистрация по паролю тоже закроется."
+            if [ -t 0 ]; then
+                read -rp "$(echo -e "${YELLOW}?${NC} Выключить вход по паролю? [y/N]: ")" _CONFIRM
+                [[ "$_CONFIRM" =~ ^[Yy]$ ]] || { info "Отменено"; exit 0; }
+            fi
+        fi
+
+        cp .env .env.bak-passwords
+        env_put INSTALL_PASSWORD_LOGIN "$([ "$_WANT" = on ] && echo true || echo false)"
+        mas_reconfigure >/dev/null || { mv .env.bak-passwords .env; err "Не удалось обновить конфиг MAS"; }
+        rm -f .env.bak-passwords
+        docker compose restart mas >/dev/null
+        if [ "$_WANT" = "on" ]; then
+            log "Вход по паролю включён — прежние пароли снова работают"
+        else
+            log "Вход по паролю выключен. Включить обратно: ./manage.sh password-login on"
         fi
         ;;
 

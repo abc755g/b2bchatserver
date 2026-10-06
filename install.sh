@@ -762,9 +762,9 @@ PORTAL_LOGIN=false
 if $USE_MAS; then
     echo ""
     info "B2B-портал (b2b-links.ru) может стать ещё одной кнопкой входа на ваш сервер:"
-    info "сотрудник входит учёткой портала, без отдельного пароля от чата. Вход по паролю"
-    info "и через IdP компании остаётся; если портал недоступен, сервер работает как"
-    info "обычно — пропадает только эта кнопка."
+    info "сотрудник входит учёткой портала, без отдельного пароля от чата. Вход через"
+    info "IdP компании остаётся; если портал недоступен, сервер работает как обычно —"
+    info "пропадает только эта кнопка."
     info "Портал пускает только сотрудников, которые уже входили на этот сервер своим"
     info "паролем, и попадают они в свой аккаунт. Новых аккаунтов он не создаёт."
     info "Учтите: вы доверяете порталу подтверждать, кто из сотрудников входит."
@@ -773,6 +773,25 @@ if $USE_MAS; then
         log "Вход через B2B-портал: разрешён"
     else
         log "Вход через B2B-портал: нет"
+    fi
+fi
+
+# Вход по паролю. Спрашиваем, только когда есть другой способ войти — IdP
+# компании или портал; без них пароль единственный вход, и выключать нечего.
+# Если портал ещё не подтвердил домен, start.sh оставит пароль включённым.
+PASSWORD_LOGIN=true
+if $USE_MAS && { $PORTAL_LOGIN || { [ -n "$(prev_val INSTALL_OIDC_ISSUER '')" ] && [ -n "$(prev_val INSTALL_OIDC_CLIENT_ID '')" ]; }; }; then
+    echo ""
+    info "Вход по паролю можно оставить рядом с внешним входом или выключить: тогда"
+    info "сотрудники входят только через IdP компании или портал. Пароли не удаляются —"
+    info "при обратном включении прежние пароли снова работают."
+    info "Без пароля войдёт только тот, кого знает внешний поставщик; администратору"
+    info "сервера остаются SSH и ./manage.sh."
+    if ask_yn "Оставить вход по паролю?" "$(prev_bool INSTALL_PASSWORD_LOGIN true)"; then
+        log "Вход по паролю: включён"
+    else
+        PASSWORD_LOGIN=false
+        log "Вход по паролю: выключен (если внешний вход ещё не подключён — останется включённым)"
     fi
 fi
 
@@ -1224,6 +1243,7 @@ if $PORTAL_LOGIN; then
     _PORTAL_CLIENT_ID=$(prev_val INSTALL_PORTAL_CLIENT_ID "")
     [ -n "$_PORTAL_CLIENT_ID" ] && PARAMS="${PARAMS} --portal-client-id ${_PORTAL_CLIENT_ID}"
 fi
+$PASSWORD_LOGIN && PARAMS="${PARAMS} --password-login yes" || PARAMS="${PARAMS} --password-login no"
 PARAMS="${PARAMS} --federation-mode ${FEDERATION_MODE}"
 [ -n "$FEDERATION_SERVERS" ] && PARAMS="${PARAMS} --federation-servers ${FEDERATION_SERVERS}"
 PARAMS="${PARAMS} --e2ee ${E2EE_MODE}"

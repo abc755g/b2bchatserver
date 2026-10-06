@@ -81,6 +81,7 @@ def main() -> int:
     ap.add_argument("--server-name", required=True)
     ap.add_argument("--mas-secret", required=True)
     ap.add_argument("--password-registration", choices=["true", "false"], default="false")
+    ap.add_argument("--passwords", choices=["true", "false"], default="true")
     ap.add_argument("--oidc-issuer", default="")
     ap.add_argument("--oidc-client-id", default="")
     ap.add_argument("--oidc-name", default="SSO")
@@ -121,20 +122,6 @@ def main() -> int:
         "      allow_missing_contacts: true\n"
     ))
 
-    # Локальные пароли остаются: без них у администратора сервера нет входа,
-    # если внешний провайдер недоступен. Саморегистрацию открывает отдельный флаг.
-    # Правим только строку enabled — schemes и minimum_complexity ставит сам MAS.
-    text = re.sub(r"(?m)^passwords:\n  enabled: .*", "passwords:\n  enabled: true", text, count=1)
-
-    reg = f"  password_registration_enabled: {args.password_registration}"
-    if re.search(r"(?m)^account:", text):
-        if re.search(r"(?m)^  password_registration_enabled:", text):
-            text = re.sub(r"(?m)^  password_registration_enabled: .*", reg, text, count=1)
-        else:
-            text = re.sub(r"(?m)^account:", "account:\n" + reg, text, count=1)
-    else:
-        text = text.rstrip("\n") + "\n\naccount:\n" + reg + "\n"
-
     provider_id = existing_provider_id(text)
     # Вместе с блоком — и пустую строку после него, которую дописывает вставка
     # ниже: иначе каждый прогон добавлял бы перед matrix: ещё одну.
@@ -168,6 +155,29 @@ def main() -> int:
     if providers:
         block = "upstream_oauth2:\n  providers:\n" + "".join(providers)
         text = re.sub(r"(?m)^matrix:", block + "\nmatrix:", text, count=1)
+
+    # Вход по паролю — выбор компании (--passwords), по умолчанию включён.
+    # Выключить его можно только рядом с другим поставщиком входа: иначе на
+    # сервер не вошёл бы никто, включая администратора. Без паролей нет и
+    # саморегистрации по паролю — MAS её не допускает.
+    passwords = args.passwords
+    if passwords == "false" and not providers:
+        print("Вход по паролю включён: другого способа входа на сервер не осталось", file=sys.stderr)
+        passwords = "true"
+    registration = args.password_registration if passwords == "true" else "false"
+
+    # Правим только строку enabled — schemes и minimum_complexity ставит сам MAS:
+    # хеши паролей остаются, и повторное включение возвращает прежние пароли.
+    text = re.sub(r"(?m)^passwords:\n  enabled: .*", f"passwords:\n  enabled: {passwords}", text, count=1)
+
+    reg = f"  password_registration_enabled: {registration}"
+    if re.search(r"(?m)^account:", text):
+        if re.search(r"(?m)^  password_registration_enabled:", text):
+            text = re.sub(r"(?m)^  password_registration_enabled: .*", reg, text, count=1)
+        else:
+            text = re.sub(r"(?m)^account:", "account:\n" + reg, text, count=1)
+    else:
+        text = text.rstrip("\n") + "\n\naccount:\n" + reg + "\n"
 
     path.write_text(text)
     return 0

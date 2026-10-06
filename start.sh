@@ -45,6 +45,9 @@ usage() {
     echo "  --portal-login       Разрешить вход через B2B-портал (Client ID установщик"
     echo "                       берёт у портала сам, когда тот подтвердил домен)"
     echo "  --portal-client-id   Client ID вручную — вместо запроса к порталу"
+    echo ""
+    echo "  --password-login yes|no  Вход по паролю (по умолчанию yes). no — только"
+    echo "                       через OIDC или портал; без них остаётся yes"
     echo "  --max-upload     Макс. размер файла          (по умолчанию: 500M)"
     echo ""
     echo "Шифрование переписки (действует на клиенты семейства Element):"
@@ -114,6 +117,7 @@ MAX_UPLOAD="500M"
 FEDERATION_MODE="whitelist"
 FEDERATION_SERVERS=""
 E2EE_MODE="backup"
+PASSWORD_LOGIN=true
 
 SMTP_HOST=""
 SMTP_PORT=""
@@ -197,6 +201,13 @@ while [[ $# -gt 0 ]]; do
         --federation-mode)    FEDERATION_MODE="$2";    shift 2 ;;
         --federation-servers) FEDERATION_SERVERS="$2"; shift 2 ;;
         --e2ee)             E2EE_MODE="$2";        shift 2 ;;
+        --password-login)
+            case "$2" in
+                yes) PASSWORD_LOGIN=true ;;
+                no)  PASSWORD_LOGIN=false ;;
+                *)   err "Неизвестное значение: --password-login $2. Допустимо: yes, no." ;;
+            esac
+            shift 2 ;;
         --smtp-host)        SMTP_HOST="$2";        shift 2 ;;
         --smtp-port)        SMTP_PORT="$2";        shift 2 ;;
         --smtp-user)        SMTP_USER="$2";        shift 2 ;;
@@ -289,6 +300,21 @@ if $PORTAL_LOGIN && [ -z "$PORTAL_CLIENT_ID" ] && [ -n "$SERVER_NAME" ]; then
     PORTAL_CLIENT_ID=$(curl -fsS --max-time 10 "${PORTAL_ISSUER}/api/matrix/homeservers/${SERVER_NAME}/oidc-client" 2>/dev/null \
         | python3 -c 'import json,sys; print(json.load(sys.stdin).get("client_id",""))' 2>/dev/null || true)
     [ -n "$PORTAL_CLIENT_ID" ] && log "Вход через B2B-портал: портал подтвердил домен, подключаем"
+fi
+
+# Без пароля входить можно только через другого поставщика. Нет ни OIDC, ни
+# подключённого портала — пароль остаётся, иначе на сервер не вошёл бы никто.
+if ! $PASSWORD_LOGIN; then
+    if ! $USE_MAS; then
+        warn "Отключить вход по паролю можно только с MAS — оставляем включённым."
+        PASSWORD_LOGIN=true
+    elif { [ -z "$OIDC_ISSUER" ] || [ -z "$OIDC_CLIENT_ID" ]; } \
+         && { ! $PORTAL_LOGIN || [ -z "$PORTAL_CLIENT_ID" ]; }; then
+        warn "Вход по паролю оставлен включённым: нет другого способа входа (OIDC или подключённого портала)."
+        PASSWORD_LOGIN=true
+    elif $OPEN_REGISTRATION; then
+        warn "Без входа по паролю нет и регистрации по паролю — регистрация будет закрыта."
+    fi
 fi
 
 case "$E2EE_MODE" in
@@ -815,6 +841,7 @@ INSTALL_BIND_IP=${BIND_IP}
 INSTALL_FEDERATION_MODE=${FEDERATION_MODE}
 INSTALL_FEDERATION_SERVERS=${FEDERATION_SERVERS}
 INSTALL_E2EE=${E2EE_MODE}
+INSTALL_PASSWORD_LOGIN=${PASSWORD_LOGIN}
 INSTALL_USE_MAS=${USE_MAS}
 INSTALL_OIDC_ISSUER=${OIDC_ISSUER}
 INSTALL_OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
@@ -849,6 +876,7 @@ if $USE_MAS; then
         --server-name "${SERVER_NAME}" \
         --mas-secret "${MAS_SECRET}" \
         --password-registration "${_MAS_REG}" \
+        --passwords "${PASSWORD_LOGIN}" \
         --oidc-issuer "${OIDC_ISSUER}" \
         --oidc-client-id "${OIDC_CLIENT_ID}" \
         --oidc-name "${OIDC_NAME:-SSO}" \
@@ -1969,6 +1997,7 @@ echo ""
 
 if $USE_MAS; then
     echo "MAS включён: вход и регистрация идут через него, а не через Synapse."
+    $PASSWORD_LOGIN || echo "  Вход по паролю выключен — вход только через внешних поставщиков."
     echo "  Пароль администратора:  ./manage.sh mas set-password ${ADMIN_USER}"
     echo "  Токен для Admin UI:     ./manage.sh admin-token"
     if [ -n "$OIDC_ISSUER" ]; then
