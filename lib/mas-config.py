@@ -2,7 +2,8 @@
 """Правка config.yaml для matrix-authentication-service.
 
 Базовый файл делает сам MAS (`mas-cli config generate`) — здесь только
-подставляются адреса, секреты и, если задан, внешний OIDC-провайдер.
+подставляются адреса, секреты и внешние OIDC-провайдеры: IdP компании
+и B2B-портал, каждый по отдельности.
 Скрипт идемпотентен: повторный запуск не плодит блоки и не трогает
 `secrets.keys`, поэтому сессии пользователей переживают перенастройку.
 """
@@ -15,6 +16,13 @@ import sys
 
 ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
+# id провайдера «B2B-портал» один на все установки: из него MAS строит
+# redirect_uri (<issuer MAS>upstream/callback/<id>), и портал, регистрируя
+# клиента для сервера компании, вычисляет адрес сам — переписывать его вручную
+# из консоли администратору не нужно. Менять нельзя: по id MAS хранит привязки
+# аккаунтов к порталу, новый id их осиротит.
+PORTAL_PROVIDER_ID = "01B2BP0RTA0000000000000000"
+
 
 def new_ulid() -> str:
     """26 символов Crockford base32 — формат идентификатора провайдера в MAS."""
@@ -22,8 +30,38 @@ def new_ulid() -> str:
 
 
 def existing_provider_id(text: str) -> str:
-    match = re.search(r"(?m)^\s+-\s+id:\s*([0-9A-HJKMNP-TV-Z]{26})\s*$", text)
-    return match.group(1) if match else ""
+    """id провайдера компании из прошлого запуска — портал не в счёт."""
+    for match in re.finditer(r"(?m)^\s+-\s+id:\s*([0-9A-HJKMNP-TV-Z]{26})\s*$", text):
+        if match.group(1) != PORTAL_PROVIDER_ID:
+            return match.group(1)
+    return ""
+
+
+def provider_block(provider_id: str, name: str, issuer: str, client_id: str,
+                   on_conflict: str = "") -> str:
+    # http-issuer бывает только на стенде: строгий OIDC требует https
+    discovery = "    discovery_mode: insecure\n" if issuer.startswith("http://") else ""
+    conflict = f"        on_conflict: {on_conflict}\n" if on_conflict else ""
+    return (
+        f"  - id: {provider_id}\n"
+        f"    human_name: {name}\n"
+        f"    issuer: {issuer}\n"
+        f"    client_id: {client_id}\n"
+        "    token_endpoint_auth_method: none\n"
+        f"{discovery}"
+        "    scope: openid profile email\n"
+        "    claims_imports:\n"
+        "      localpart:\n"
+        "        action: require\n"
+        '        template: "{{ user.preferred_username }}"\n'
+        f"{conflict}"
+        "      displayname:\n"
+        "        action: suggest\n"
+        '        template: "{{ user.name }}"\n'
+        "      email:\n"
+        "        action: suggest\n"
+        '        template: "{{ user.email }}"\n'
+    )
 
 
 def replace_block(text: str, key: str, block: str) -> str:
@@ -45,6 +83,10 @@ def main() -> int:
     ap.add_argument("--oidc-issuer", default="")
     ap.add_argument("--oidc-client-id", default="")
     ap.add_argument("--oidc-name", default="SSO")
+    ap.add_argument("--portal-issuer", default="")
+    ap.add_argument("--portal-client-id", default="")
+    ap.add_argument("--portal-name", default="B2B-портал")
+    ap.add_argument("--portal-link-localpart", choices=["true", "false"], default="false")
     args = ap.parse_args()
 
     path = pathlib.Path(args.config)
@@ -94,36 +136,35 @@ def main() -> int:
         text = text.rstrip("\n") + "\n\naccount:\n" + reg + "\n"
 
     provider_id = existing_provider_id(text)
-    text = re.sub(r"(?m)^upstream_oauth2:\n(?:[ \t].*\n|\n(?=[ \t]))*", "", text)
+    # Вместе с блоком — и пустую строку после него, которую дописывает вставка
+    # ниже: иначе каждый прогон добавлял бы перед matrix: ещё одну.
+    text = re.sub(r"(?m)^upstream_oauth2:\n(?:[ \t].*\n|\n(?=[ \t]))*\n?", "", text)
 
+    providers = []
     if args.oidc_issuer and args.oidc_client_id:
         provider_id = provider_id or new_ulid()
-        # http-issuer бывает только на стенде: строгий OIDC требует https
-        discovery = "    discovery_mode: insecure\n" if args.oidc_issuer.startswith("http://") else ""
-        block = (
-            "upstream_oauth2:\n"
-            "  providers:\n"
-            f"  - id: {provider_id}\n"
-            f"    human_name: {args.oidc_name}\n"
-            f"    issuer: {args.oidc_issuer}\n"
-            f"    client_id: {args.oidc_client_id}\n"
-            "    token_endpoint_auth_method: none\n"
-            f"{discovery}"
-            "    scope: openid profile email\n"
-            "    claims_imports:\n"
-            "      localpart:\n"
-            "        action: require\n"
-            '        template: "{{ user.preferred_username }}"\n'
-            "      displayname:\n"
-            "        action: suggest\n"
-            '        template: "{{ user.name }}"\n'
-            "      email:\n"
-            "        action: suggest\n"
-            '        template: "{{ user.email }}"\n'
-        )
-        text = re.sub(r"(?m)^matrix:", block + "\nmatrix:", text, count=1)
+        providers.append(provider_block(provider_id, args.oidc_name,
+                                        args.oidc_issuer, args.oidc_client_id))
         print(f"OIDC-провайдер: {args.oidc_issuer} (id {provider_id})")
         print(f"redirect_uri для провайдера: {args.public_base}upstream/callback/{provider_id}")
+
+    # Портал — дополнительный способ входа, не замена: пароли и IdP компании
+    # остаются, и при недоступности портала пропадает только его кнопка.
+    # Существующий аккаунт по умолчанию к порталу сам не привязывается
+    # (on_conflict: fail): сотрудник входит паролем и затем через портал в том же
+    # браузере — MAS сам предложит связать. Сопоставление по localpart (set)
+    # включается только явно: тогда портал, назвав localpart, получает вход в
+    # чужой аккаунт без пароля, и это решение компании, а не установщика.
+    if args.portal_issuer and args.portal_client_id:
+        conflict = "set" if args.portal_link_localpart == "true" else ""
+        providers.append(provider_block(PORTAL_PROVIDER_ID, args.portal_name,
+                                        args.portal_issuer, args.portal_client_id, conflict))
+        print(f"Вход через B2B-портал: {args.portal_issuer}")
+        print(f"redirect_uri для портала: {args.public_base}upstream/callback/{PORTAL_PROVIDER_ID}")
+
+    if providers:
+        block = "upstream_oauth2:\n  providers:\n" + "".join(providers)
+        text = re.sub(r"(?m)^matrix:", block + "\nmatrix:", text, count=1)
 
     path.write_text(text)
     return 0

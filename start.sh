@@ -40,6 +40,12 @@ usage() {
     echo "  --oidc-issuer    Issuer провайдера          (https://id.company.ru)"
     echo "  --oidc-client-id Client ID, выданный провайдером"
     echo "  --oidc-name      Название кнопки входа      (по умолчанию: SSO)"
+    echo ""
+    echo "Вход через B2B-портал (требует --mas; дополнительно к паролю и OIDC выше):"
+    echo "  --portal-login       Разрешить вход через B2B-портал"
+    echo "  --portal-client-id   Client ID, который выдал портал после подтверждения домена"
+    echo "  --portal-link-localpart  Связывать вход через портал с аккаунтом того же"
+    echo "                       логина без пароля (по умолчанию связывает сам сотрудник)"
     echo "  --max-upload     Макс. размер файла          (по умолчанию: 500M)"
     echo ""
     echo "Шифрование переписки (действует на клиенты семейства Element):"
@@ -134,6 +140,12 @@ MAS_SECRET=""
 OIDC_ISSUER=""
 OIDC_CLIENT_ID=""
 OIDC_NAME=""
+PORTAL_LOGIN=false
+PORTAL_CLIENT_ID=""
+PORTAL_LINK_LOCALPART=false
+# OIDC-issuer B2B-портала — один канонический адрес, на каком бы домене дилера
+# сотрудник ни открывал портал.
+PORTAL_ISSUER="https://portal.b2b-links.ru"
 
 # ── Версии образов (пины) ─────────────────────────────────
 # Обновлять только вместе: сверьтесь с upgrade notes соответствующего проекта.
@@ -181,6 +193,9 @@ while [[ $# -gt 0 ]]; do
         --oidc-issuer)      OIDC_ISSUER="$2";      shift 2 ;;
         --oidc-client-id)   OIDC_CLIENT_ID="$2";   shift 2 ;;
         --oidc-name)        OIDC_NAME="$2";        shift 2 ;;
+        --portal-login)     PORTAL_LOGIN=true;     shift ;;
+        --portal-client-id) PORTAL_CLIENT_ID="$2"; shift 2 ;;
+        --portal-link-localpart) PORTAL_LINK_LOCALPART=true; shift ;;
         --max-upload)       MAX_UPLOAD="$2";       shift 2 ;;
         --federation-mode)    FEDERATION_MODE="$2";    shift 2 ;;
         --federation-servers) FEDERATION_SERVERS="$2"; shift 2 ;;
@@ -263,6 +278,11 @@ MISSING=""
 if [ -n "$MISSING" ]; then
     echo -e "${RED}[ERR]${NC} Не указаны обязательные параметры:${MISSING}"
     usage; exit 1
+fi
+
+if $PORTAL_LOGIN && ! $USE_MAS; then
+    warn "Вход через B2B-портал требует MAS — без --mas он не подключается."
+    PORTAL_LOGIN=false
 fi
 
 case "$E2EE_MODE" in
@@ -793,6 +813,9 @@ INSTALL_USE_MAS=${USE_MAS}
 INSTALL_OIDC_ISSUER=${OIDC_ISSUER}
 INSTALL_OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
 INSTALL_OIDC_NAME=${OIDC_NAME}
+INSTALL_PORTAL_LOGIN=${PORTAL_LOGIN}
+INSTALL_PORTAL_CLIENT_ID=${PORTAL_CLIENT_ID}
+INSTALL_PORTAL_LINK_LOCALPART=${PORTAL_LINK_LOCALPART}
 ENV
 
 # homeserver.yaml
@@ -808,6 +831,13 @@ if $USE_MAS; then
     fi
     _MAS_REG="false"
     $OPEN_REGISTRATION && _MAS_REG="true"
+    # Согласие на портал без client_id — нормальное состояние сразу после
+    # установки: портал выдаёт его, только когда подтвердит домен.
+    _PORTAL_ARGS=()
+    if $PORTAL_LOGIN && [ -n "$PORTAL_CLIENT_ID" ]; then
+        _PORTAL_ARGS=(--portal-issuer "$PORTAL_ISSUER" --portal-client-id "$PORTAL_CLIENT_ID"
+                      --portal-link-localpart "$PORTAL_LINK_LOCALPART")
+    fi
     [ -f lib/mas-config.py ] || err "Не найден lib/mas-config.py — он нужен для настройки MAS. Обновите установку до версии, где lib/ входит в архив релиза, либо положите файл вручную."
     python3 lib/mas-config.py ./config/mas/config.yaml \
         --public-base "https://${DOMAIN}/" \
@@ -817,7 +847,8 @@ if $USE_MAS; then
         --password-registration "${_MAS_REG}" \
         --oidc-issuer "${OIDC_ISSUER}" \
         --oidc-client-id "${OIDC_CLIENT_ID}" \
-        --oidc-name "${OIDC_NAME:-SSO}" || err "Не удалось настроить MAS"
+        --oidc-name "${OIDC_NAME:-SSO}" \
+        "${_PORTAL_ARGS[@]}" || err "Не удалось настроить MAS"
     # MAS в контейнере работает не от root — файл должен читаться
     chmod 755 ./config/mas && chmod 644 ./config/mas/config.yaml
     log "Конфиг MAS готов"
@@ -1940,6 +1971,13 @@ if $USE_MAS; then
         echo "  Вход через провайдера:  ${OIDC_ISSUER}"
     else
         echo "  Подключить внешний вход: ./manage.sh oidc --issuer <URL> --client-id <ID>"
+    fi
+    if $PORTAL_LOGIN && [ -n "$PORTAL_CLIENT_ID" ]; then
+        echo "  Вход через B2B-портал:  включён"
+    elif $PORTAL_LOGIN; then
+        echo "  Вход через B2B-портал разрешён. Портал выдаст Client ID, когда подтвердит"
+        echo "  домен (./manage.sh verify-domain), после этого:"
+        echo "    ./manage.sh portal-login --client-id <ID>"
     fi
     echo ""
 fi

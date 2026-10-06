@@ -96,6 +96,42 @@ mas_cli() {
     docker compose exec -T mas mas-cli -c /config/config.yaml "$@"
 }
 
+# OIDC-issuer B2B-портала — тот же, что в start.sh
+PORTAL_ISSUER="https://portal.b2b-links.ru"
+
+env_get() { grep "^$1=" .env | cut -d= -f2- || true; }
+
+# Строки, которых нет в .env старых установок, sed -i s/// не создаст
+env_put() {
+    sed -i "/^$1=/d" .env
+    echo "$1=$2" >> .env
+}
+
+# Пересобрать провайдеров входа в конфиге MAS из .env. mas-config.py пишет блок
+# upstream_oauth2 целиком, поэтому IdP компании и портал передаются всегда
+# вместе — иначе настройка одного стёрла бы другого.
+mas_reconfigure() {
+    local reg="false" portal=()
+    # Регистрацию при MAS переключает он сам (см. registration), а start.sh
+    # держит enable_registration в Synapse выключенным — берём из конфига MAS.
+    grep -q "^  password_registration_enabled: true" ./config/mas/config.yaml && reg="true"
+    if [ "$(env_get INSTALL_PORTAL_LOGIN)" = "true" ] && [ -n "$(env_get INSTALL_PORTAL_CLIENT_ID)" ]; then
+        portal=(--portal-issuer "$PORTAL_ISSUER"
+                --portal-client-id "$(env_get INSTALL_PORTAL_CLIENT_ID)"
+                --portal-link-localpart "$(env_get INSTALL_PORTAL_LINK_LOCALPART | grep -x true || echo false)")
+    fi
+    python3 lib/mas-config.py ./config/mas/config.yaml \
+        --public-base "https://$(env_get SYNAPSE_DOMAIN)/" \
+        --db-uri "postgresql://synapse:$(env_get POSTGRES_PASSWORD)@postgres:5432/mas" \
+        --server-name "$(env_get SERVER_NAME)" \
+        --mas-secret "$(env_get MAS_SECRET)" \
+        --password-registration "${reg}" \
+        --oidc-issuer "$(env_get INSTALL_OIDC_ISSUER)" \
+        --oidc-client-id "$(env_get INSTALL_OIDC_CLIENT_ID)" \
+        --oidc-name "$(env_get INSTALL_OIDC_NAME | grep . || echo SSO)" \
+        "${portal[@]}"
+}
+
 # ── Справка ───────────────────────────────────────────────
 usage() {
     echo ""
@@ -128,6 +164,10 @@ usage() {
     echo "  oidc --issuer URL --client-id ID [--name NAME]"
     echo "                            Вход через внешнего OIDC-провайдера (нужен MAS)"
     echo "  oidc --disable            Отключить внешний вход"
+    echo "  portal-login --client-id ID [--link-by-localpart]"
+    echo "                            Вход через B2B-портал (ID выдаёт портал после"
+    echo "                            подтверждения домена); пароль и IdP остаются"
+    echo "  portal-login --disable    Отключить вход через портал"
     echo "  mas <команда...>          Прямой вызов mas-cli manage (set-password и др.)"
     echo "  mas-migrate [--apply]     Перенос аккаунтов Synapse в MAS (syn2mas)"
     echo "  password-reset     Экстренный сброс пароля администратора"
@@ -142,7 +182,7 @@ usage() {
 COMMAND="${1:-}"
 SERVICE=""
 FED_LIST=false; FED_ADD=""; FED_REMOVE=""; FED_SYNC=""; FED_MODE=""; FED_TEST=""
-TOKEN=""; WK_PATH="b2b-matrix-verify"; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false
+TOKEN=""; WK_PATH="b2b-matrix-verify"; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false; LINK_LOCALPART=false
 shift || true
 
 # mas — прозрачная прокладка к mas-cli, свои аргументы не разбираем
@@ -168,6 +208,7 @@ while [[ $# -gt 0 ]]; do
         --name)      OIDC_NAME="$2";      shift 2 ;;
         --disable)   OIDC_DISABLE=true;   shift ;;
         --apply)     APPLY=true;          shift ;;
+        --link-by-localpart) LINK_LOCALPART=true; shift ;;
         --help|-h) usage; exit 0 ;;
         *) err "Неизвестный параметр: $1" ;;
     esac
@@ -734,39 +775,62 @@ for d in items:
 
     oidc)
         mas_enabled || err "Внешний вход требует MAS. Включите его: ./install.sh → режим «изменить настройки»"
-        DOMAIN=$(grep "^SYNAPSE_DOMAIN=" .env | cut -d= -f2)
-        SERVER_NAME=$(grep "^SERVER_NAME=" .env | cut -d= -f2)
-        DB_PASS=$(grep "^POSTGRES_PASSWORD=" .env | cut -d= -f2)
-        MAS_SECRET=$(grep "^MAS_SECRET=" .env | cut -d= -f2)
-        _REG="false"; [ "$(hs_get enable_registration)" = "true" ] && _REG="true"
 
         if $OIDC_DISABLE; then
             OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""
         else
             [ -z "$OIDC_ISSUER" ] || [ -z "$OIDC_CLIENT_ID" ] && \
                 err "Нужны оба параметра: ./manage.sh oidc --issuer https://... --client-id <ID> [--name Название]"
-            [ -z "$OIDC_NAME" ] && OIDC_NAME=$(grep "^INSTALL_OIDC_NAME=" .env | cut -d= -f2)
+            [ -z "$OIDC_NAME" ] && OIDC_NAME=$(env_get INSTALL_OIDC_NAME)
         fi
 
-        python3 lib/mas-config.py ./config/mas/config.yaml \
-            --public-base "https://${DOMAIN}/" \
-            --db-uri "postgresql://synapse:${DB_PASS}@postgres:5432/mas" \
-            --server-name "${SERVER_NAME}" \
-            --mas-secret "${MAS_SECRET}" \
-            --password-registration "${_REG}" \
-            --oidc-issuer "${OIDC_ISSUER}" \
-            --oidc-client-id "${OIDC_CLIENT_ID}" \
-            --oidc-name "${OIDC_NAME:-SSO}" || err "Не удалось обновить конфиг MAS"
-
-        sed -i "s|^INSTALL_OIDC_ISSUER=.*|INSTALL_OIDC_ISSUER=${OIDC_ISSUER}|" .env
-        sed -i "s|^INSTALL_OIDC_CLIENT_ID=.*|INSTALL_OIDC_CLIENT_ID=${OIDC_CLIENT_ID}|" .env
-        sed -i "s|^INSTALL_OIDC_NAME=.*|INSTALL_OIDC_NAME=${OIDC_NAME}|" .env
+        cp .env .env.bak-oidc
+        env_put INSTALL_OIDC_ISSUER "${OIDC_ISSUER}"
+        env_put INSTALL_OIDC_CLIENT_ID "${OIDC_CLIENT_ID}"
+        env_put INSTALL_OIDC_NAME "${OIDC_NAME}"
+        mas_reconfigure || { mv .env.bak-oidc .env; err "Не удалось обновить конфиг MAS"; }
+        rm -f .env.bak-oidc
         docker compose restart mas >/dev/null
         if $OIDC_DISABLE; then
             log "Внешний вход отключён"
         else
             log "Внешний вход включён: ${OIDC_ISSUER}"
             info "redirect_uri выше — его нужно зарегистрировать у провайдера"
+        fi
+        ;;
+
+    portal-login)
+        mas_enabled || err "Вход через портал требует MAS. Включите его: ./install.sh → режим «изменить настройки»"
+
+        $OIDC_DISABLE || [ -n "$OIDC_CLIENT_ID" ] || \
+            err "Нужен Client ID от портала: ./manage.sh portal-login --client-id <ID>. Портал выдаёт его в «Настройках сервера Matrix» после подтверждения домена."
+
+        cp .env .env.bak-portal
+        if $OIDC_DISABLE; then
+            env_put INSTALL_PORTAL_LOGIN false
+            env_put INSTALL_PORTAL_CLIENT_ID ""
+            env_put INSTALL_PORTAL_LINK_LOCALPART false
+        else
+            env_put INSTALL_PORTAL_LOGIN true
+            env_put INSTALL_PORTAL_CLIENT_ID "${OIDC_CLIENT_ID}"
+            env_put INSTALL_PORTAL_LINK_LOCALPART "${LINK_LOCALPART}"
+        fi
+        mas_reconfigure || { mv .env.bak-portal .env; err "Не удалось обновить конфиг MAS"; }
+        rm -f .env.bak-portal
+        docker compose restart mas >/dev/null
+
+        if $OIDC_DISABLE; then
+            log "Вход через B2B-портал отключён. Привязки аккаунтов к порталу MAS сохранил —"
+            info "при повторном включении сотрудникам не придётся связывать их заново."
+        else
+            log "Вход через B2B-портал включён — кнопка на https://$(env_get SYNAPSE_DOMAIN)/login"
+            info "redirect_uri выше портал вычисляет сам, сообщать его не нужно."
+            if $LINK_LOCALPART; then
+                warn "Вход через портал попадает в существующий аккаунт с тем же логином без пароля."
+            else
+                info "Сотрудник с уже существующим аккаунтом входит сначала паролем, затем в том же"
+                info "браузере — через портал: MAS предложит связать. Иначе получит новый аккаунт."
+            fi
         fi
         ;;
 

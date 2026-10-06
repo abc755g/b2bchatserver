@@ -752,6 +752,28 @@ if [ "$MODIFY_MODE" = "true" ] && $USE_MAS && [ "$(prev_bool INSTALL_USE_MAS 'fa
     echo ""
 fi
 
+# Вход через B2B-портал — дополнительная кнопка на экране входа MAS. Спрашиваем
+# и в рекомендуемом режиме: доверить порталу подтверждать личность сотрудников —
+# решение компании, а не установщика. Client ID портал выдаёт только после
+# подтверждения домена, поэтому здесь фиксируем согласие, а подключает
+# ./manage.sh portal-login. По умолчанию «да» — и для серверов, где вопроса ещё
+# не было.
+PORTAL_LOGIN=false
+if $USE_MAS; then
+    echo ""
+    info "B2B-портал (b2b-links.ru) может стать ещё одной кнопкой входа на ваш сервер:"
+    info "сотрудник входит учёткой портала, без отдельного пароля от чата. Вход по паролю"
+    info "и через IdP компании остаётся; если портал недоступен, сервер работает как"
+    info "обычно — пропадает только эта кнопка."
+    info "Учтите: портал сможет подтвердить личность любого вашего сотрудника."
+    if ask_yn "Разрешить вход через B2B-портал?" "$(prev_bool INSTALL_PORTAL_LOGIN true)"; then
+        PORTAL_LOGIN=true
+        log "Вход через B2B-портал: разрешён"
+    else
+        log "Вход через B2B-портал: нет"
+    fi
+fi
+
 # ── Блок 9: Регистрация пользователей ────────────────────
 if $ADVANCED_SETUP; then
     title "Блок 9 — Регистрация пользователей"
@@ -1194,6 +1216,12 @@ _OIDC_NAME=$(prev_val INSTALL_OIDC_NAME "")
 if $USE_MAS && [ -n "$_OIDC_ISSUER" ] && [ -n "$_OIDC_CLIENT_ID" ]; then
     PARAMS="${PARAMS} --oidc-issuer ${_OIDC_ISSUER} --oidc-client-id ${_OIDC_CLIENT_ID}"
     [ -n "$_OIDC_NAME" ] && PARAMS="${PARAMS} --oidc-name ${_OIDC_NAME}"
+fi
+if $PORTAL_LOGIN; then
+    PARAMS="${PARAMS} --portal-login"
+    _PORTAL_CLIENT_ID=$(prev_val INSTALL_PORTAL_CLIENT_ID "")
+    [ -n "$_PORTAL_CLIENT_ID" ] && PARAMS="${PARAMS} --portal-client-id ${_PORTAL_CLIENT_ID}"
+    [ "$(prev_val INSTALL_PORTAL_LINK_LOCALPART false)" = "true" ] && PARAMS="${PARAMS} --portal-link-localpart"
 fi
 PARAMS="${PARAMS} --federation-mode ${FEDERATION_MODE}"
 [ -n "$FEDERATION_SERVERS" ] && PARAMS="${PARAMS} --federation-servers ${FEDERATION_SERVERS}"
