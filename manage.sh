@@ -888,6 +888,8 @@ for d in items:
 
         cp .env .env.bak-passwords
         env_put INSTALL_PASSWORD_LOGIN "$([ "$_WANT" = on ] && echo true || echo false)"
+        # Явный выбор администратора — его же install.sh предложит по умолчанию
+        env_put INSTALL_PASSWORD_LOGIN_CHOICE "$([ "$_WANT" = on ] && echo true || echo false)"
         mas_reconfigure >/dev/null || { mv .env.bak-passwords .env; err "Не удалось обновить конфиг MAS"; }
         rm -f .env.bak-passwords
         docker compose restart mas >/dev/null

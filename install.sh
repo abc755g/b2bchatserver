@@ -69,6 +69,13 @@ persist_install_prefs() {
     sed -i '/^INSTALL_ADVANCED_SETUP=/d; /^INSTALL_USE_B2B=/d' "${INSTALL_DIR}/.env"
     echo "INSTALL_ADVANCED_SETUP=${ADVANCED_SETUP}" >> "${INSTALL_DIR}/.env"
     echo "INSTALL_USE_B2B=${USE_B2B:-false}" >> "${INSTALL_DIR}/.env"
+    # Ответ на «Оставить вход по паролю?» — отдельно от INSTALL_PASSWORD_LOGIN,
+    # где start.sh пишет фактическое состояние: пароль остаётся включённым и
+    # тогда, когда выключать нечего, и это не должно становиться ответом «да».
+    if [ -n "${PASSWORD_LOGIN_CHOICE:-}" ]; then
+        sed -i '/^INSTALL_PASSWORD_LOGIN_CHOICE=/d' "${INSTALL_DIR}/.env"
+        echo "INSTALL_PASSWORD_LOGIN_CHOICE=${PASSWORD_LOGIN_CHOICE}" >> "${INSTALL_DIR}/.env"
+    fi
 }
 
 # true/false → y/n для ask_yn
@@ -779,7 +786,11 @@ fi
 # Вход по паролю. Спрашиваем, только когда есть другой способ войти — IdP
 # компании или портал; без них пароль единственный вход, и выключать нечего.
 # Если портал ещё не подтвердил домен, start.sh оставит пароль включённым.
+# По умолчанию «нет»: пока компания сама не ответила «да», вход — через
+# внешнего поставщика.
 PASSWORD_LOGIN=true
+PASSWORD_LOGIN_CHOICE=$(prev_val INSTALL_PASSWORD_LOGIN_CHOICE "")
+[ -z "$PASSWORD_LOGIN_CHOICE" ] || [ "$PASSWORD_LOGIN_CHOICE" = "true" ] || PASSWORD_LOGIN=false
 if $USE_MAS && { $PORTAL_LOGIN || { [ -n "$(prev_val INSTALL_OIDC_ISSUER '')" ] && [ -n "$(prev_val INSTALL_OIDC_CLIENT_ID '')" ]; }; }; then
     echo ""
     info "Вход по паролю можно оставить рядом с внешним входом или выключить: тогда"
@@ -787,10 +798,13 @@ if $USE_MAS && { $PORTAL_LOGIN || { [ -n "$(prev_val INSTALL_OIDC_ISSUER '')" ] 
     info "при обратном включении прежние пароли снова работают."
     info "Без пароля войдёт только тот, кого знает внешний поставщик; администратору"
     info "сервера остаются SSH и ./manage.sh."
-    if ask_yn "Оставить вход по паролю?" "$(prev_bool INSTALL_PASSWORD_LOGIN true)"; then
+    if ask_yn "Оставить вход по паролю?" "$([ "$PASSWORD_LOGIN_CHOICE" = "true" ] && echo y || echo n)"; then
+        PASSWORD_LOGIN=true
+        PASSWORD_LOGIN_CHOICE=true
         log "Вход по паролю: включён"
     else
         PASSWORD_LOGIN=false
+        PASSWORD_LOGIN_CHOICE=false
         log "Вход по паролю: выключен (если внешний вход ещё не подключён — останется включённым)"
     fi
 fi
