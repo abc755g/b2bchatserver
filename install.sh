@@ -755,9 +755,9 @@ fi
 # Вход через B2B-портал — дополнительная кнопка на экране входа MAS. Спрашиваем
 # и в рекомендуемом режиме: доверить порталу подтверждать личность сотрудников —
 # решение компании, а не установщика. Client ID портал выдаёт только после
-# подтверждения домена, поэтому здесь фиксируем согласие, а подключает
-# ./manage.sh portal-login. По умолчанию «да» — и для серверов, где вопроса ещё
-# не было.
+# подтверждения домена: если домен уже подтверждён, start.sh заберёт его сам,
+# иначе подключит ./manage.sh portal-login. По умолчанию «да» — и для серверов,
+# где вопроса ещё не было.
 PORTAL_LOGIN=false
 if $USE_MAS; then
     echo ""
@@ -765,7 +765,9 @@ if $USE_MAS; then
     info "сотрудник входит учёткой портала, без отдельного пароля от чата. Вход по паролю"
     info "и через IdP компании остаётся; если портал недоступен, сервер работает как"
     info "обычно — пропадает только эта кнопка."
-    info "Учтите: портал сможет подтвердить личность любого вашего сотрудника."
+    info "Портал пускает только сотрудников, которые уже входили на этот сервер своим"
+    info "паролем, и попадают они в свой аккаунт. Новых аккаунтов он не создаёт."
+    info "Учтите: вы доверяете порталу подтверждать, кто из сотрудников входит."
     if ask_yn "Разрешить вход через B2B-портал?" "$(prev_bool INSTALL_PORTAL_LOGIN true)"; then
         PORTAL_LOGIN=true
         log "Вход через B2B-портал: разрешён"
@@ -1221,7 +1223,6 @@ if $PORTAL_LOGIN; then
     PARAMS="${PARAMS} --portal-login"
     _PORTAL_CLIENT_ID=$(prev_val INSTALL_PORTAL_CLIENT_ID "")
     [ -n "$_PORTAL_CLIENT_ID" ] && PARAMS="${PARAMS} --portal-client-id ${_PORTAL_CLIENT_ID}"
-    [ "$(prev_val INSTALL_PORTAL_LINK_LOCALPART false)" = "true" ] && PARAMS="${PARAMS} --portal-link-localpart"
 fi
 PARAMS="${PARAMS} --federation-mode ${FEDERATION_MODE}"
 [ -n "$FEDERATION_SERVERS" ] && PARAMS="${PARAMS} --federation-servers ${FEDERATION_SERVERS}"

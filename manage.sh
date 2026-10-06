@@ -117,8 +117,7 @@ mas_reconfigure() {
     grep -q "^  password_registration_enabled: true" ./config/mas/config.yaml && reg="true"
     if [ "$(env_get INSTALL_PORTAL_LOGIN)" = "true" ] && [ -n "$(env_get INSTALL_PORTAL_CLIENT_ID)" ]; then
         portal=(--portal-issuer "$PORTAL_ISSUER"
-                --portal-client-id "$(env_get INSTALL_PORTAL_CLIENT_ID)"
-                --portal-link-localpart "$(env_get INSTALL_PORTAL_LINK_LOCALPART | grep -x true || echo false)")
+                --portal-client-id "$(env_get INSTALL_PORTAL_CLIENT_ID)")
     fi
     python3 lib/mas-config.py ./config/mas/config.yaml \
         --public-base "https://$(env_get SYNAPSE_DOMAIN)/" \
@@ -164,9 +163,9 @@ usage() {
     echo "  oidc --issuer URL --client-id ID [--name NAME]"
     echo "                            Вход через внешнего OIDC-провайдера (нужен MAS)"
     echo "  oidc --disable            Отключить внешний вход"
-    echo "  portal-login --client-id ID [--link-by-localpart]"
-    echo "                            Вход через B2B-портал (ID выдаёт портал после"
-    echo "                            подтверждения домена); пароль и IdP остаются"
+    echo "  portal-login              Вход через B2B-портал: ID берётся у портала, когда"
+    echo "                            он подтвердил домен; пароль и IdP остаются"
+    echo "  portal-login --client-id ID  То же с ID вручную"
     echo "  portal-login --disable    Отключить вход через портал"
     echo "  mas <команда...>          Прямой вызов mas-cli manage (set-password и др.)"
     echo "  mas-migrate [--apply]     Перенос аккаунтов Synapse в MAS (syn2mas)"
@@ -182,7 +181,7 @@ usage() {
 COMMAND="${1:-}"
 SERVICE=""
 FED_LIST=false; FED_ADD=""; FED_REMOVE=""; FED_SYNC=""; FED_MODE=""; FED_TEST=""
-TOKEN=""; WK_PATH="b2b-matrix-verify"; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false; LINK_LOCALPART=false
+TOKEN=""; WK_PATH="b2b-matrix-verify"; OUT=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_NAME=""; OIDC_DISABLE=false; APPLY=false
 shift || true
 
 # mas — прозрачная прокладка к mas-cli, свои аргументы не разбираем
@@ -208,7 +207,6 @@ while [[ $# -gt 0 ]]; do
         --name)      OIDC_NAME="$2";      shift 2 ;;
         --disable)   OIDC_DISABLE=true;   shift ;;
         --apply)     APPLY=true;          shift ;;
-        --link-by-localpart) LINK_LOCALPART=true; shift ;;
         --help|-h) usage; exit 0 ;;
         *) err "Неизвестный параметр: $1" ;;
     esac
@@ -731,6 +729,10 @@ for d in items:
             warn "Снаружи токен пока не читается — подождите несколько секунд и проверьте: curl ${_URL}"
         fi
         info "Второй способ подтверждения, если сервис его предлагает, — TXT-запись в DNS домена ${DOMAIN}"
+        if [ "$WK_PATH" = "b2b-matrix-verify" ] && [ "$(env_get INSTALL_PORTAL_LOGIN)" = "true" ] && [ -z "$(env_get INSTALL_PORTAL_CLIENT_ID)" ]; then
+            info "Когда портал подтвердит домен («Проверить» в его настройках), включите вход через портал:"
+            info "  ./manage.sh portal-login"
+        fi
         ;;
 
     backup-key)
@@ -802,19 +804,31 @@ for d in items:
     portal-login)
         mas_enabled || err "Вход через портал требует MAS. Включите его: ./install.sh → режим «изменить настройки»"
 
-        $OIDC_DISABLE || [ -n "$OIDC_CLIENT_ID" ] || \
-            err "Нужен Client ID от портала: ./manage.sh portal-login --client-id <ID>. Портал выдаёт его в «Настройках сервера Matrix» после подтверждения домена."
+        if ! $OIDC_DISABLE && [ -z "$OIDC_CLIENT_ID" ]; then
+            _SNAME=$(env_get SERVER_NAME)
+            info "Спрашиваем у портала Client ID для ${_SNAME}..."
+            _RESP=$(curl -sS --max-time 15 -w '\n%{http_code}' "${PORTAL_ISSUER}/api/matrix/homeservers/${_SNAME}/oidc-client" 2>&1) \
+                || err "Портал не ответил: ${_RESP}"
+            _CODE=$(printf '%s' "$_RESP" | tail -n1)
+            _BODY=$(printf '%s' "$_RESP" | sed '$d')
+            _FIELD() { printf '%s' "$_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null || true; }
+            if [ "$_CODE" != "200" ]; then
+                _MSG=$(_FIELD message)
+                err "${_MSG:-Портал ответил HTTP ${_CODE}}"
+            fi
+            OIDC_CLIENT_ID=$(_FIELD client_id)
+            [ -n "$OIDC_CLIENT_ID" ] || err "Портал не прислал Client ID"
+        fi
 
         cp .env .env.bak-portal
         if $OIDC_DISABLE; then
             env_put INSTALL_PORTAL_LOGIN false
             env_put INSTALL_PORTAL_CLIENT_ID ""
-            env_put INSTALL_PORTAL_LINK_LOCALPART false
         else
             env_put INSTALL_PORTAL_LOGIN true
             env_put INSTALL_PORTAL_CLIENT_ID "${OIDC_CLIENT_ID}"
-            env_put INSTALL_PORTAL_LINK_LOCALPART "${LINK_LOCALPART}"
         fi
+        sed -i "/^INSTALL_PORTAL_LINK_LOCALPART=/d" .env
         mas_reconfigure || { mv .env.bak-portal .env; err "Не удалось обновить конфиг MAS"; }
         rm -f .env.bak-portal
         docker compose restart mas >/dev/null
@@ -824,13 +838,8 @@ for d in items:
             info "при повторном включении сотрудникам не придётся связывать их заново."
         else
             log "Вход через B2B-портал включён — кнопка на https://$(env_get SYNAPSE_DOMAIN)/login"
-            info "redirect_uri выше портал вычисляет сам, сообщать его не нужно."
-            if $LINK_LOCALPART; then
-                warn "Вход через портал попадает в существующий аккаунт с тем же логином без пароля."
-            else
-                info "Сотрудник с уже существующим аккаунтом входит сначала паролем, затем в том же"
-                info "браузере — через портал: MAS предложит связать. Иначе получит новый аккаунт."
-            fi
+            info "Сотрудник, который хоть раз входил в чат портала через этот сервер, попадёт"
+            info "в свой аккаунт. Остальным портал объяснит, что сделать; новых аккаунтов он не создаёт."
         fi
         ;;
 

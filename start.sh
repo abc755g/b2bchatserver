@@ -42,10 +42,9 @@ usage() {
     echo "  --oidc-name      Название кнопки входа      (по умолчанию: SSO)"
     echo ""
     echo "Вход через B2B-портал (требует --mas; дополнительно к паролю и OIDC выше):"
-    echo "  --portal-login       Разрешить вход через B2B-портал"
-    echo "  --portal-client-id   Client ID, который выдал портал после подтверждения домена"
-    echo "  --portal-link-localpart  Связывать вход через портал с аккаунтом того же"
-    echo "                       логина без пароля (по умолчанию связывает сам сотрудник)"
+    echo "  --portal-login       Разрешить вход через B2B-портал (Client ID установщик"
+    echo "                       берёт у портала сам, когда тот подтвердил домен)"
+    echo "  --portal-client-id   Client ID вручную — вместо запроса к порталу"
     echo "  --max-upload     Макс. размер файла          (по умолчанию: 500M)"
     echo ""
     echo "Шифрование переписки (действует на клиенты семейства Element):"
@@ -142,7 +141,6 @@ OIDC_CLIENT_ID=""
 OIDC_NAME=""
 PORTAL_LOGIN=false
 PORTAL_CLIENT_ID=""
-PORTAL_LINK_LOCALPART=false
 # OIDC-issuer B2B-портала — один канонический адрес, на каком бы домене дилера
 # сотрудник ни открывал портал.
 PORTAL_ISSUER="https://portal.b2b-links.ru"
@@ -195,7 +193,6 @@ while [[ $# -gt 0 ]]; do
         --oidc-name)        OIDC_NAME="$2";        shift 2 ;;
         --portal-login)     PORTAL_LOGIN=true;     shift ;;
         --portal-client-id) PORTAL_CLIENT_ID="$2"; shift 2 ;;
-        --portal-link-localpart) PORTAL_LINK_LOCALPART=true; shift ;;
         --max-upload)       MAX_UPLOAD="$2";       shift 2 ;;
         --federation-mode)    FEDERATION_MODE="$2";    shift 2 ;;
         --federation-servers) FEDERATION_SERVERS="$2"; shift 2 ;;
@@ -283,6 +280,15 @@ fi
 if $PORTAL_LOGIN && ! $USE_MAS; then
     warn "Вход через B2B-портал требует MAS — без --mas он не подключается."
     PORTAL_LOGIN=false
+fi
+
+# Client ID портал выдаёт серверу, домен которого подтвердил. Пока не
+# подтвердил — пусто, и это нормально: кнопка появится после
+# ./manage.sh portal-login. Ошибка сети установку не останавливает.
+if $PORTAL_LOGIN && [ -z "$PORTAL_CLIENT_ID" ] && [ -n "$SERVER_NAME" ]; then
+    PORTAL_CLIENT_ID=$(curl -fsS --max-time 10 "${PORTAL_ISSUER}/api/matrix/homeservers/${SERVER_NAME}/oidc-client" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("client_id",""))' 2>/dev/null || true)
+    [ -n "$PORTAL_CLIENT_ID" ] && log "Вход через B2B-портал: портал подтвердил домен, подключаем"
 fi
 
 case "$E2EE_MODE" in
@@ -815,7 +821,6 @@ INSTALL_OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
 INSTALL_OIDC_NAME=${OIDC_NAME}
 INSTALL_PORTAL_LOGIN=${PORTAL_LOGIN}
 INSTALL_PORTAL_CLIENT_ID=${PORTAL_CLIENT_ID}
-INSTALL_PORTAL_LINK_LOCALPART=${PORTAL_LINK_LOCALPART}
 ENV
 
 # homeserver.yaml
@@ -835,8 +840,7 @@ if $USE_MAS; then
     # установки: портал выдаёт его, только когда подтвердит домен.
     _PORTAL_ARGS=()
     if $PORTAL_LOGIN && [ -n "$PORTAL_CLIENT_ID" ]; then
-        _PORTAL_ARGS=(--portal-issuer "$PORTAL_ISSUER" --portal-client-id "$PORTAL_CLIENT_ID"
-                      --portal-link-localpart "$PORTAL_LINK_LOCALPART")
+        _PORTAL_ARGS=(--portal-issuer "$PORTAL_ISSUER" --portal-client-id "$PORTAL_CLIENT_ID")
     fi
     [ -f lib/mas-config.py ] || err "Не найден lib/mas-config.py — он нужен для настройки MAS. Обновите установку до версии, где lib/ входит в архив релиза, либо положите файл вручную."
     python3 lib/mas-config.py ./config/mas/config.yaml \
@@ -1975,9 +1979,9 @@ if $USE_MAS; then
     if $PORTAL_LOGIN && [ -n "$PORTAL_CLIENT_ID" ]; then
         echo "  Вход через B2B-портал:  включён"
     elif $PORTAL_LOGIN; then
-        echo "  Вход через B2B-портал разрешён. Портал выдаст Client ID, когда подтвердит"
-        echo "  домен (./manage.sh verify-domain), после этого:"
-        echo "    ./manage.sh portal-login --client-id <ID>"
+        echo "  Вход через B2B-портал разрешён. Кнопка появится, когда портал подтвердит"
+        echo "  домен (./manage.sh verify-domain, затем «Проверить» в портале):"
+        echo "    ./manage.sh portal-login"
     fi
     echo ""
 fi

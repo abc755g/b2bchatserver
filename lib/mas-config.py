@@ -38,7 +38,8 @@ def existing_provider_id(text: str) -> str:
 
 
 def provider_block(provider_id: str, name: str, issuer: str, client_id: str,
-                   on_conflict: str = "") -> str:
+                   on_conflict: str = "", scope: str = "openid profile email",
+                   localpart: str = '"{{ user.preferred_username }}"') -> str:
     # http-issuer бывает только на стенде: строгий OIDC требует https
     discovery = "    discovery_mode: insecure\n" if issuer.startswith("http://") else ""
     conflict = f"        on_conflict: {on_conflict}\n" if on_conflict else ""
@@ -49,11 +50,11 @@ def provider_block(provider_id: str, name: str, issuer: str, client_id: str,
         f"    client_id: {client_id}\n"
         "    token_endpoint_auth_method: none\n"
         f"{discovery}"
-        "    scope: openid profile email\n"
+        f"    scope: {scope}\n"
         "    claims_imports:\n"
         "      localpart:\n"
         "        action: require\n"
-        '        template: "{{ user.preferred_username }}"\n'
+        f"        template: {localpart}\n"
         f"{conflict}"
         "      displayname:\n"
         "        action: suggest\n"
@@ -86,7 +87,6 @@ def main() -> int:
     ap.add_argument("--portal-issuer", default="")
     ap.add_argument("--portal-client-id", default="")
     ap.add_argument("--portal-name", default="B2B-портал")
-    ap.add_argument("--portal-link-localpart", choices=["true", "false"], default="false")
     args = ap.parse_args()
 
     path = pathlib.Path(args.config)
@@ -150,17 +150,20 @@ def main() -> int:
 
     # Портал — дополнительный способ входа, не замена: пароли и IdP компании
     # остаются, и при недоступности портала пропадает только его кнопка.
-    # Существующий аккаунт по умолчанию к порталу сам не привязывается
-    # (on_conflict: fail): сотрудник входит паролем и затем через портал в том же
-    # браузере — MAS сам предложит связать. Сопоставление по localpart (set)
-    # включается только явно: тогда портал, назвав localpart, получает вход в
-    # чужой аккаунт без пароля, и это решение компании, а не установщика.
+    # Логин портал присылает в claim b2b_mxids (scope b2b_matrix) — только тот,
+    # владение которым сотрудник уже подтвердил входом на этот сервер, а без
+    # подтверждения сам не пускает. Поэтому вход связывается с существующим
+    # аккаунтом без пароля (on_conflict: set — если у аккаунта ещё нет привязки
+    # к порталу) и новых аккаунтов через портал не появляется.
     if args.portal_issuer and args.portal_client_id:
-        conflict = "set" if args.portal_link_localpart == "true" else ""
-        providers.append(provider_block(PORTAL_PROVIDER_ID, args.portal_name,
-                                        args.portal_issuer, args.portal_client_id, conflict))
+        key = args.server_name.replace("\\", "").replace('"', "")
+        providers.append(provider_block(
+            PORTAL_PROVIDER_ID, args.portal_name, args.portal_issuer, args.portal_client_id,
+            on_conflict="set",
+            scope="openid profile email b2b_matrix",
+            localpart="'{{ user.b2b_mxids[\"%s\"] }}'" % key,
+        ))
         print(f"Вход через B2B-портал: {args.portal_issuer}")
-        print(f"redirect_uri для портала: {args.public_base}upstream/callback/{PORTAL_PROVIDER_ID}")
 
     if providers:
         block = "upstream_oauth2:\n  providers:\n" + "".join(providers)
