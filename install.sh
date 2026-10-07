@@ -1222,6 +1222,14 @@ else
     fi
 fi
 
+# Кладём себя рядом с start.sh: README и подсказка в конце установки предлагают
+# менять настройки командой ./install.sh, а запускают нас обычно из /tmp.
+# При запуске через «curl | bash» файла нет — копировать нечего.
+if [ -f "$0" ] && ! [ "$0" -ef ./install.sh ]; then
+    cp -f "$0" ./install.sh
+    chmod +x ./install.sh
+fi
+
 chmod +x start.sh manage.sh
 
 # Формируем параметры для start.sh
